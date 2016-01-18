@@ -81,11 +81,17 @@ in {
       curl -s "http://logserver:4242/api/query?start=1d-ago&m=$query"
     }
 
+    function list_metrics() {
+      curl -s "http://logserver:4242/api/suggest?type=metrics&max=4096"
+    }
+
     function dump_logs() {
       elasticdump \
         --all=true \
         --input=http://logserver:9200/ \
         --output=logs.json
+
+      list_metrics > metrics-names.json
 
       #query_metrics > metrics.json \
       #  'sum:nginx.request.count{path=*,host=*,servername=*}'
