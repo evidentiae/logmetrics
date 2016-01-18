@@ -1,7 +1,7 @@
 { mkDerivation, stdenv, aeson, base, bytestring
-, containers, directory, filepath, http-client, http-types
+, unordered-containers, directory, filepath, http-client, http-types
 , lens, scotty, text, transformers, wai, wai-extra
-, warp, warp-tls, wreq
+, warp, warp-tls, wreq, stm
 }:
 mkDerivation {
   pname = "logmetrics";
@@ -10,9 +10,9 @@ mkDerivation {
   isLibrary = false;
   isExecutable = true;
   executableHaskellDepends = [
-    aeson base bytestring containers directory
+    aeson base bytestring unordered-containers directory
     filepath http-client http-types lens scotty text
-    transformers wai wai-extra warp warp-tls wreq
+    transformers wai wai-extra warp warp-tls wreq stm
   ];
   license = stdenv.lib.licenses.unfree;
 }
