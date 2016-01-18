@@ -1,5 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 import Data.Aeson (FromJSON)
 import Data.Text (Text)
@@ -8,12 +9,14 @@ import System.Environment
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as ByteString
+import qualified Web.Scotty as Scotty
 
 data Config = Config
   { logHost :: Text
-  , logPort :: Integer
+  , logPort :: Int
   , metricsHost :: Text
-  , metricsPort :: Text
+  , metricsPort :: Int
+  , port :: Int
   } deriving (Generic, FromJSON)
 
 loadConfig :: IO Config
@@ -24,18 +27,13 @@ loadConfig = do
     Right config -> return config
     Left err -> error err
 
+postLogEvent :: Scotty.ActionM ()
+postLogEvent = pure ()
+
+server :: Scotty.ScottyM ()
+server = Scotty.post "/log/event" postLogEvent
+
 main :: IO ()
 main = do
-  _config <- loadConfig
-  pure ()
-  {-
-  t <- newIORef (Trie.empty, IntMap.empty)
-  _ <- forkIO (loadThings thingdir t)
-  app <- application t
-  exePath <- getExecutablePath
-  let pkgPath = takeDirectory (takeDirectory exePath)
-  let certPath = pkgPath </> "certificate.pem"
-  let keyPath = pkgPath </> "key.pem"
-  let settings = tlsSettings certPath keyPath
-  runTLS settings (setPort 443 defaultSettings) app
-  -}
+  config <- loadConfig
+  Scotty.scotty (port config) server
