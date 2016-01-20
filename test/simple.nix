@@ -107,7 +107,9 @@ in {
     while ! nc -z logserver 8070; do echo "waiting for logserver:8070 (bosun)"; sleep 2; done
 
     # Give logs and metrics some time to flush
-    sleep 15
+    sleep 30
+
+    list_metrics 
   '';
 
 }

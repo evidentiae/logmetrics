@@ -6,18 +6,19 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, (.=))
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
 import Data.Int
 import Data.List
 import Data.Maybe
+import Data.Monoid
 import Data.String.Conv
 import Data.Text (Text)
 import Data.Time.Clock.POSIX
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.Lens
+import Control.Lens hiding ((.=))
 import Control.Monad
 import Control.Monad.IO.Class
 import GHC.Generics
@@ -79,21 +80,27 @@ loadConfig = do
 type LogEvent = HashMap Text Aeson.Value
 
 -- | OpenTSDB DataPoint
---
--- NOTE: the "No explicit implementation" warning is a GHC bug
 data DataPoint = DataPoint
   { dpMetric :: Text
   , dpTimestamp :: Int64
   , dpValue :: Int64
   , dpTags :: HashMap Text Text
-  } deriving (Show, Generic, ToJSON)
+  } deriving Generic
+
+instance ToJSON DataPoint where
+  toEncoding (DataPoint {dpMetric, dpTimestamp, dpValue, dpTags}) =
+    Aeson.pairs $
+      "metric" .= dpMetric <>
+      "timestamp" .= dpTimestamp <>
+      "value" .= dpValue <>
+      "tags" .= dpTags
 
 ------------------------------------------------------------------------------
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-counterToDataPoint :: Config -> Int64 -> (CounterKey, Int64) -> DataPoint
-counterToDataPoint (Config {metrics}) timestamp (key, count) =
+counterToDataPoint :: [Metric] -> Int64 -> (CounterKey, Int64) -> DataPoint
+counterToDataPoint metrics timestamp (key, count) =
   let metric = fromJust (find (\m -> name m == ckMetricName key) metrics) in
   DataPoint
     { dpMetric = name metric
@@ -103,13 +110,14 @@ counterToDataPoint (Config {metrics}) timestamp (key, count) =
     }
 
 sendMetrics :: Config -> Counters -> IO ()
-sendMetrics config counters = do
+sendMetrics (Config {metricsHost, metricsPort, metrics}) counters = do
   cs <- countersToList counters
   time <- getPOSIXTime
   let timestamp :: Int64 = round time -- seconds
-  let dps = map (counterToDataPoint config timestamp) cs
-  liftIO $ print dps
-  -- TODO: send
+  let points = map (counterToDataPoint metrics timestamp) cs
+  when (not (null points)) $ do
+    let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put"
+    void $ liftIO $ Wreq.post url (Aeson.encode points)
 
 metricsThread :: Config -> Counters -> IO ()
 metricsThread config counters = forever $ do
