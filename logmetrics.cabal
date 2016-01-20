@@ -25,5 +25,6 @@ executable logmetrics
                        scotty,
                        wai-extra,
                        aeson,
-                       stm
+                       stm,
+                       string-conv
   default-language:    Haskell2010
