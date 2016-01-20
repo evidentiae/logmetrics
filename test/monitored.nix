@@ -128,7 +128,7 @@ let
       @type elasticsearch
       @id elasticsearch
       host logserver
-      port 9200
+      port 9100
       reload_on_failure true
       logstash_format true
       logstash_prefix logs

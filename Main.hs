@@ -9,7 +9,9 @@ import Data.Int
 import Data.Text (Text)
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.Monad.IO.Class
 import GHC.Generics
+import Network.Wai.Middleware.RequestLogger
 import System.Environment
 
 import qualified Data.Aeson as Aeson
@@ -17,11 +19,11 @@ import qualified Data.ByteString as ByteString
 import qualified Web.Scotty as Scotty
 
 data Config = Config
-  { logHost :: Text
+  { port :: Int
+  , logHost :: Text
   , logPort :: Int
   , metricsHost :: Text
   , metricsPort :: Int
-  , port :: Int
   , metricsInterval :: Int -- milliseconds
   } deriving (Generic, FromJSON)
 
@@ -33,6 +35,9 @@ loadConfig = do
     Right config -> return config
     Left err -> error err
 
+-- | OpenTSDB DataPoint
+--
+-- NOTE: the "No explicit implementation" warning is a GHC bug
 data DataPoint = DataPoint
   { metric :: Text
   , timestamp :: Int64
@@ -45,8 +50,14 @@ type Buffer = TVar [DataPoint]
 postLogEvent :: Scotty.ActionM ()
 postLogEvent = pure ()
 
-server :: Buffer -> Scotty.ScottyM ()
-server _buffer = Scotty.post "/log/event" postLogEvent
+server :: Config -> Buffer -> IO ()
+server config _buffer =
+  Scotty.scotty (port config) $ do
+    Scotty.middleware logStdoutDev
+    Scotty.post "/_bulk" $ do
+      b <- Scotty.body
+      liftIO $ print b
+    Scotty.matchAny "/" $ Scotty.text "" -- fluentd sends HEAD /
 
 metricsThread :: Config -> Buffer -> IO ()
 metricsThread _config _buffer = pure ()
@@ -56,4 +67,4 @@ main = do
   config <- loadConfig
   buffer <- newTVarIO []
   _ <- forkIO (metricsThread config buffer)
-  Scotty.scotty (port config) (server buffer)
+  server config buffer

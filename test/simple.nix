@@ -33,6 +33,7 @@ in {
     nixos.modules = singleton {
       imports = [
         ./monitored.nix
+        ./logmetrics.nix
       ];
       services.elasticsearch = {
         enable = true;
@@ -101,6 +102,7 @@ in {
 
     # Wait for monitor server to start
     while ! nc -z logserver 9200; do echo "waiting for logserver:9200"; sleep 2; done
+    while ! nc -z logserver 9100; do echo "waiting for logserver:9100"; sleep 2; done
     while ! nc -z logserver 4242; do echo "waiting for logserver:4242"; sleep 2; done
     while ! nc -z logserver 8070; do echo "waiting for logserver:8070"; sleep 2; done
 

@@ -14,5 +14,5 @@ mkDerivation {
     filepath http-client http-types lens scotty text
     transformers wai wai-extra warp warp-tls wreq stm
   ];
-  license = stdenv.lib.licenses.unfree;
+  license = stdenv.lib.licenses.free;
 }
