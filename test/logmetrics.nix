@@ -17,7 +17,17 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
             "logPort": 9200,
             "metricsHost": "logserver",
             "metricsPort": 8070,
-            "metricsInterval": 3000
+            "metricsInterval": 3000,
+            "metrics": [{
+              "name": "scsi",
+              "matches": [{
+                "match": "contains",
+                "field": "kernel_device",
+                "value": "scsi"
+              }],
+              "tags": {"type": "hw"},
+              "tagsFromFields": {"hostname": "host"}
+            }]
           }
         '';
       };

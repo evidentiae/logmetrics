@@ -1,7 +1,7 @@
 { mkDerivation, stdenv, aeson, base, bytestring
 , unordered-containers, directory, filepath, http-client, http-types
 , lens, scotty, text, transformers, wai, wai-extra
-, warp, warp-tls, wreq, stm, string-conv
+, warp, warp-tls, wreq, stm, string-conv, hashable, stm-containers
 }:
 mkDerivation {
   pname = "logmetrics";
@@ -13,7 +13,7 @@ mkDerivation {
     aeson base bytestring unordered-containers directory
     filepath http-client http-types lens scotty text
     transformers wai wai-extra warp warp-tls wreq stm
-    string-conv
+    string-conv hashable stm-containers
   ];
   license = stdenv.lib.licenses.free;
 }
