@@ -10,7 +10,6 @@ import Data.Aeson (FromJSON, ToJSON, (.=))
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
 import Data.Int
-import Data.List
 import Data.Maybe
 import Data.Monoid
 import Data.String.Conv
@@ -99,9 +98,9 @@ instance ToJSON DataPoint where
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-counterToDataPoint :: [Metric] -> Int64 -> (CounterKey, Int64) -> DataPoint
-counterToDataPoint metrics timestamp (key, count) =
-  let metric = fromJust (find (\m -> name m == ckMetricName key) metrics) in
+counterToDataPoint :: HashMap MetricName Metric -> Int64 -> (CounterKey, Int64) -> DataPoint
+counterToDataPoint metricsMap timestamp (key, count) =
+  let metric = fromJust (HashMap.lookup (ckMetricName key) metricsMap) in
   DataPoint
     { dpMetric = name metric
     , dpTimestamp = timestamp
@@ -109,12 +108,12 @@ counterToDataPoint metrics timestamp (key, count) =
     , dpTags = HashMap.union (tags metric) (HashMap.fromList (ckTagsFromFields key))
     }
 
-sendMetrics :: Config -> Counters -> IO ()
-sendMetrics (Config {metricsHost, metricsPort, metrics}) counters = do
+sendMetrics :: Config -> HashMap MetricName Metric -> Counters -> IO ()
+sendMetrics (Config {metricsHost, metricsPort}) metricsMap counters = do
   cs <- countersToList counters
   time <- getPOSIXTime
   let timestamp :: Int64 = round time -- seconds
-  let points = map (counterToDataPoint metrics timestamp) cs
+  let points = map (counterToDataPoint metricsMap timestamp) cs
   when (not (null points)) $ do
     let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put"
     void $ liftIO $ Wreq.post url (Aeson.encode points)
@@ -122,7 +121,9 @@ sendMetrics (Config {metricsHost, metricsPort, metrics}) counters = do
 metricsThread :: Config -> Counters -> IO ()
 metricsThread config counters = forever $ do
   threadDelay (metricsInterval config * 1000)
-  forkIO (sendMetrics config counters)
+  forkIO (sendMetrics config metricsMap counters)
+  where
+    metricsMap = HashMap.fromList [(name m, m) | m <- metrics config]
 
 ------------------------------------------------------------------------------
 -- Counters
