@@ -6,13 +6,15 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 
-import Data.Aeson (FromJSON, ToJSON, (.:))
+import Data.Aeson (FromJSON, ToJSON)
+import Data.Hashable
 import Data.HashMap.Strict (HashMap)
 import Data.Int
-import Data.Hashable
+import Data.List
 import Data.Maybe
 import Data.String.Conv
 import Data.Text (Text)
+import Data.Time.Clock.POSIX
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.Lens
@@ -28,6 +30,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as Text
+import qualified ListT as ListT
 import qualified Network.Wreq as Wreq
 import qualified STMContainers.Map as Map
 import qualified Web.Scotty as Scotty
@@ -70,8 +73,10 @@ loadConfig = do
     Right config -> return config
 
 ------------------------------------------------------------------------------
--- Data points
+-- Log and metric types
 ------------------------------------------------------------------------------
+
+type LogEvent = HashMap Text Aeson.Value
 
 -- | OpenTSDB DataPoint
 --
@@ -81,16 +86,35 @@ data DataPoint = DataPoint
   , dpTimestamp :: Int64
   , dpValue :: Int64
   , dpTags :: HashMap Text Text
-  } deriving (Generic, ToJSON)
-
-type Buffer = TVar [DataPoint]
+  } deriving (Show, Generic, ToJSON)
 
 ------------------------------------------------------------------------------
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-metricsThread :: Config -> Buffer -> IO ()
-metricsThread _config _buffer = pure ()
+counterToDataPoint :: Config -> Int64 -> (CounterKey, Int64) -> DataPoint
+counterToDataPoint (Config {metrics}) timestamp (key, count) =
+  let metric = fromJust (find (\m -> name m == ckMetricName key) metrics) in
+  DataPoint
+    { dpMetric = name metric
+    , dpTimestamp = timestamp
+    , dpValue = count
+    , dpTags = HashMap.union (tags metric) (HashMap.fromList (ckTagsFromFields key))
+    }
+
+sendMetrics :: Config -> Counters -> IO ()
+sendMetrics config counters = do
+  cs <- countersToList counters
+  time <- getPOSIXTime
+  let timestamp :: Int64 = round time -- seconds
+  let dps = map (counterToDataPoint config timestamp) cs
+  liftIO $ print dps
+  -- TODO: send
+
+metricsThread :: Config -> Counters -> IO ()
+metricsThread config counters = forever $ do
+  threadDelay (metricsInterval config * 1000)
+  forkIO (sendMetrics config counters)
 
 ------------------------------------------------------------------------------
 -- Counters
@@ -111,18 +135,8 @@ bumpCounter counters key = atomically $ do
     Nothing -> Map.insert 0 key counters
     Just counter -> Map.insert (counter + 1) key counters
 
-------------------------------------------------------------------------------
--- LogEvent
-------------------------------------------------------------------------------
-
-data LogEvent = LogEvent
-  { timestamp :: Text
-  , fields :: HashMap Text Aeson.Value
-  } deriving Show
-
-instance FromJSON LogEvent where
-  parseJSON (Aeson.Object o) = LogEvent <$> o .: "@timestamp" <*> pure o
-  parseJSON _ = mzero
+countersToList :: Counters -> IO [(CounterKey, Int64)]
+countersToList counters = atomically (ListT.toList (Map.stream counters))
 
 ------------------------------------------------------------------------------
 -- Matching
@@ -136,8 +150,8 @@ lookupString key fields =
     _ -> error "we only support matching/tagging on string fields"
 
 matchField :: LogEvent -> FieldMatch -> Bool
-matchField (LogEvent {fields}) (FieldMatch {match, field, value}) =
-  case lookupString field fields of
+matchField event (FieldMatch {match, field, value}) =
+  case lookupString field event of
     Nothing -> False
     Just str ->
       case match of
@@ -149,8 +163,8 @@ matchMetric :: LogEvent -> Metric -> Bool
 matchMetric event (Metric {matches}) = any (matchField event) matches
 
 getTagsFromFields :: LogEvent -> Metric -> [(Text, Text)]
-getTagsFromFields (LogEvent {fields}) (Metric {tagsFromFields}) =
-  [ (tag, fromMaybe "null" (lookupString field fields))
+getTagsFromFields event (Metric {tagsFromFields}) =
+  [ (tag, fromMaybe "null" (lookupString field event))
   | (tag, field) <- HashMap.toList tagsFromFields ]
 
 matchingMetrics :: LogEvent -> [Metric] -> [CounterKey]
@@ -162,22 +176,35 @@ matchingMetrics event metrics =
 -- Server
 ------------------------------------------------------------------------------
 
-handleLogEvent :: Buffer -> Counters -> [Metric] -> BL.ByteString -> IO ()
-handleLogEvent _buffer counters metrics body =
-  case Aeson.eitherDecode body of
-    Left err -> putStrLn err
-    Right (event :: LogEvent) -> do
-      let keys = matchingMetrics event metrics
-      mapM_ (bumpCounter counters) keys
+sourcesInBulk :: BL.ByteString -> [BL.ByteString]
+sourcesInBulk body = go (BL.split 0x0a body)
+  where
+    go [] = []
+    go (_index : []) = []
+    go (_index : source : objs) = source : go objs
 
-server :: Config -> Buffer -> Counters -> IO ()
-server (Config {port, logHost, logPort, metrics}) buffer counters =
+handleBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
+handleBulk counters metrics body =
+  mapM_ (handleLogEvent counters metrics) (sourcesInBulk body)
+
+handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> IO ()
+handleLogEvent counters metrics body = do
+  if BL.null body then putStrLn "Received empty body" else
+    case Aeson.eitherDecode body of
+      Left err -> putStrLn err
+      Right (Aeson.Object event) -> do
+        let keys = matchingMetrics event metrics
+        mapM_ (bumpCounter counters) keys
+      _ -> putStrLn "Received a non-object"
+
+server :: Config -> Counters -> IO ()
+server (Config {port, logHost, logPort, metrics}) counters =
   let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk" in
   Scotty.scotty port $ do
     Scotty.middleware logStdoutDev
     Scotty.post "/_bulk" $ do
       body <- Scotty.body
-      _ <- liftIO $ forkIO $ (handleLogEvent buffer counters metrics body)
+      _ <- liftIO $ forkIO $ (handleBulk counters metrics body)
       r <- liftIO $ Wreq.post logUrl body
       Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
       Scotty.raw (r ^. Wreq.responseBody)
@@ -192,7 +219,6 @@ main = do
   putStrLn "Loading config..."
   config <- loadConfig
   putStrLn "Finished loading config"
-  buffer <- newTVarIO []
-  _ <- forkIO (metricsThread config buffer)
   counters <- Map.newIO
-  server config buffer counters
+  _ <- forkIO (metricsThread config counters)
+  server config counters
