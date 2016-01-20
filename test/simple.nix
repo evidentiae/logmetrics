@@ -101,10 +101,10 @@ in {
     trap dump_logs SIGINT SIGTERM EXIT
 
     # Wait for monitor server to start
-    while ! nc -z logserver 9200; do echo "waiting for logserver:9200"; sleep 2; done
-    while ! nc -z logserver 9100; do echo "waiting for logserver:9100"; sleep 2; done
-    while ! nc -z logserver 4242; do echo "waiting for logserver:4242"; sleep 2; done
-    while ! nc -z logserver 8070; do echo "waiting for logserver:8070"; sleep 2; done
+    while ! nc -z logserver 9200; do echo "waiting for logserver:9200 (elasticsearch)"; sleep 2; done
+    while ! nc -z logserver 9100; do echo "waiting for logserver:9100 (logmetrics)"; sleep 2; done
+    while ! nc -z logserver 4242; do echo "waiting for logserver:4242 (hbase)"; sleep 2; done
+    while ! nc -z logserver 8070; do echo "waiting for logserver:8070 (bosun)"; sleep 2; done
 
     # Give logs and metrics some time to flush
     sleep 15
