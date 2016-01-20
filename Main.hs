@@ -93,6 +93,28 @@ instance ToJSON DataPoint where
       "tags" .= dpTags
 
 ------------------------------------------------------------------------------
+-- Counters
+------------------------------------------------------------------------------
+
+data CounterKey = CounterKey
+  { ckMetricName :: MetricName
+  , ckTagsFromFields :: [(Text, Text)]
+  } deriving (Generic, Hashable, Eq)
+
+type Counters = Map CounterKey Int64
+
+-- Creates a new counter on-the-fly if none is found
+bumpCounter :: Counters -> CounterKey -> IO ()
+bumpCounter counters key = atomically $ do
+  mCounter <- Map.lookup key counters
+  case mCounter of
+    Nothing -> Map.insert 0 key counters
+    Just counter -> Map.insert (counter + 1) key counters
+
+countersToList :: Counters -> IO [(CounterKey, Int64)]
+countersToList counters = atomically (ListT.toList (Map.stream counters))
+
+------------------------------------------------------------------------------
 -- Metrics thread
 ------------------------------------------------------------------------------
 
@@ -122,28 +144,6 @@ metricsThread config counters = forever $ do
   forkIO (sendMetrics config metricsMap counters)
   where
     metricsMap = HashMap.fromList [(name m, m) | m <- metrics config]
-
-------------------------------------------------------------------------------
--- Counters
-------------------------------------------------------------------------------
-
-data CounterKey = CounterKey
-  { ckMetricName :: MetricName
-  , ckTagsFromFields :: [(Text, Text)]
-  } deriving (Generic, Hashable, Eq)
-
-type Counters = Map CounterKey Int64
-
--- Creates a new counter on-the-fly if none is found
-bumpCounter :: Counters -> CounterKey -> IO ()
-bumpCounter counters key = atomically $ do
-  mCounter <- Map.lookup key counters
-  case mCounter of
-    Nothing -> Map.insert 0 key counters
-    Just counter -> Map.insert (counter + 1) key counters
-
-countersToList :: Counters -> IO [(CounterKey, Int64)]
-countersToList counters = atomically (ListT.toList (Map.stream counters))
 
 ------------------------------------------------------------------------------
 -- Matching
