@@ -20,7 +20,6 @@ import Control.Lens hiding ((.=))
 import Control.Monad
 import Control.Monad.IO.Class
 import GHC.Generics
-import Network.Wai.Middleware.RequestLogger
 import STMContainers.Map (Map)
 import System.Environment
 
@@ -209,7 +208,6 @@ server :: Config -> Counters -> IO ()
 server (Config {port, logHost, logPort, metrics}) counters =
   let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk" in
   Scotty.scotty port $ do
-    Scotty.middleware logStdoutDev
     Scotty.post "/_bulk" $ do
       body <- Scotty.body
       _ <- liftIO $ forkIO $ (handleBulk counters metrics body)

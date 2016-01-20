@@ -16,7 +16,6 @@ executable logmetrics
                        lens,
                        wreq,
                        scotty,
-                       wai-extra,
                        aeson,
                        stm,
                        string-conv,

@@ -1,5 +1,5 @@
 { mkDerivation, stdenv, aeson, base, bytestring
-, unordered-containers, lens, scotty, text, transformers, wai-extra
+, unordered-containers, lens, scotty, text, transformers
 , wreq, stm, string-conv, hashable, list-t, stm-containers, time
 }:
 mkDerivation {
@@ -10,7 +10,7 @@ mkDerivation {
   isExecutable = true;
   executableHaskellDepends = [
     aeson base bytestring unordered-containers
-    lens scotty text transformers wai-extra wreq stm
+    lens scotty text transformers wreq stm
     string-conv hashable list-t stm-containers time
   ];
   license = stdenv.lib.licenses.free;
