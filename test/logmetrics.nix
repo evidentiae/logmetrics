@@ -15,8 +15,8 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
             "port": 9100,
             "logHost": "logserver",
             "logPort": 9200,
-            "metricsHost": "todo",
-            "metricsPort": 55555,
+            "metricsHost": "logserver",
+            "metricsPort": 8070,
             "metricsInterval": 3000
           }
         '';
