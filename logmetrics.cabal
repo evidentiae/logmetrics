@@ -17,6 +17,8 @@ executable logmetrics
                        text,
                        lens,
                        wreq,
+                       systemd,
+                       warp,
                        scotty,
                        aeson,
                        stm,
