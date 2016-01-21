@@ -6,6 +6,8 @@
 {-# LANGUAGE TupleSections #-}
 
 import Data.Aeson (FromJSON, ToJSON, (.=))
+import Data.Bifunctor
+import Data.Char
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
 import Data.Int
@@ -16,6 +18,7 @@ import Data.Text (Text)
 import Data.Time.Clock.POSIX
 import Control.Concurrent
 import Control.Concurrent.STM
+import Control.DeepSeq
 import Control.Lens hiding ((.=))
 import Control.Monad
 import Control.Monad.IO.Class
@@ -41,7 +44,7 @@ data FieldMatch = FieldMatch
   { match :: Text -- match type: "exact" or "contains"
   , field :: Text
   , value :: Text
-  } deriving (Generic, FromJSON)
+  } deriving (Generic, FromJSON, NFData)
 
 type MetricName = Text
 
@@ -50,7 +53,7 @@ data Metric = Metric
   , matches :: [FieldMatch]
   , tags :: HashMap Text Text
   , tagsFromFields :: HashMap Text Text
-  } deriving (Generic, FromJSON)
+  } deriving (Generic, FromJSON, NFData)
 
 data Config = Config
   { port :: Int
@@ -60,7 +63,28 @@ data Config = Config
   , metricsPort :: Int
   , metricsInterval :: Int -- milliseconds
   , metrics :: [Metric]
-  } deriving (Generic, FromJSON)
+  } deriving (Generic, FromJSON, NFData)
+
+validChar :: Char -> Char
+validChar c
+  | isAlpha c || isDigit c || c `elem` ['-', '_', '.', '/'] = c
+  | otherwise = error ("Forbidden character in tag/metric name: " ++ [c])
+
+validName :: Text -> Text
+validName str = Text.map validChar str
+
+validTags :: HashMap Text Text -> HashMap Text Text
+validTags = HashMap.fromList . map (first validName) . HashMap.toList
+
+validMetric :: Metric -> Metric
+validMetric m =
+  m { name = validName (name m)
+    , tags = validTags (tags m)
+    , tagsFromFields = validTags (tagsFromFields m)
+    }
+
+validConfig :: Config -> Config
+validConfig c = c {metrics = map validMetric (metrics c)}
 
 loadConfig :: IO Config
 loadConfig = do
@@ -68,7 +92,7 @@ loadConfig = do
   json <- B.readFile configPath
   case Aeson.eitherDecodeStrict json of
     Left err -> error err
-    Right config -> return config
+    Right config -> pure $!! validConfig config
 
 ------------------------------------------------------------------------------
 -- Log and metric types

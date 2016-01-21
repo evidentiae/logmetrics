@@ -1,4 +1,4 @@
-{ mkDerivation, stdenv, aeson, base, bytestring
+{ mkDerivation, stdenv, aeson, base, bytestring, deepseq
 , unordered-containers, lens, scotty, text, transformers
 , wreq, stm, string-conv, hashable, list-t, stm-containers, time
 }:
@@ -9,7 +9,7 @@ mkDerivation {
   isLibrary = false;
   isExecutable = true;
   executableHaskellDepends = [
-    aeson base bytestring unordered-containers
+    aeson base bytestring deepseq unordered-containers
     lens scotty text transformers wreq stm
     string-conv hashable list-t stm-containers time
   ];

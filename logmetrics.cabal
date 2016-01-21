@@ -11,6 +11,7 @@ executable logmetrics
   build-depends:       base,
                        transformers,
                        bytestring,
+                       deepseq,
                        unordered-containers,
                        text,
                        lens,
