@@ -25,6 +25,7 @@ import Control.Monad.IO.Class
 import GHC.Generics
 import STMContainers.Map (Map)
 import System.Environment
+import Text.Read
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as B
@@ -53,6 +54,8 @@ data Metric = Metric
   , matches :: [FieldMatch]
   , tags :: HashMap Text Text
   , tagsFromFields :: HashMap Text Text
+  , incrementBy :: Maybe Text
+  , count :: Maybe Text
   } deriving (Generic, FromJSON, NFData)
 
 data Config = Config
@@ -128,12 +131,12 @@ data CounterKey = CounterKey
 type Counters = Map CounterKey Int64
 
 -- Creates a new counter on-the-fly if none is found
-bumpCounter :: Counters -> CounterKey -> IO ()
-bumpCounter counters key = atomically $ do
+bumpCounter :: Counters -> (CounterKey, Int64 -> Int64) -> IO ()
+bumpCounter counters (key, f) = atomically $ do
   mCounter <- Map.lookup key counters
   case mCounter of
-    Nothing -> Map.insert 0 key counters
-    Just counter -> Map.insert (counter + 1) key counters
+    Nothing -> Map.insert (f 0) key counters
+    Just counter -> Map.insert (f counter) key counters
 
 countersToList :: Counters -> IO [(CounterKey, Int64)]
 countersToList counters = atomically (ListT.toList (Map.stream counters))
@@ -180,6 +183,13 @@ lookupString key fields =
     Just (Aeson.String str) -> Just str
     _ -> error "we only support matching/tagging on string fields"
 
+lookupInt :: Text -> HashMap Text Aeson.Value -> Maybe Int64
+lookupInt field event = do
+  str <- lookupString field event
+  fromMaybe
+    (error "value of matching count field cannot be parsed as an integer")
+    (readMaybe (toS str))
+
 matchField :: LogEvent -> FieldMatch -> Bool
 matchField event (FieldMatch {match, field, value}) =
   case lookupString field event of
@@ -190,18 +200,29 @@ matchField event (FieldMatch {match, field, value}) =
         "contains" -> value `Text.isInfixOf` str
         _ -> error "unsupported match type"
 
-matchMetric :: LogEvent -> Metric -> Bool
-matchMetric event (Metric {matches}) = any (matchField event) matches
+matchMetric :: LogEvent -> Metric -> Maybe (Int64 -> Int64)
+matchMetric event (Metric {matches, incrementBy, count}) =
+  let counterFun =
+        case (incrementBy, count) of
+          (Nothing, Nothing) -> Just (+1)
+          (Just field, _) -> (+) <$> lookupInt field event
+          (Nothing, Just field) -> const <$> lookupInt field event
+  in
+  case counterFun of
+    Nothing -> Nothing
+    Just f
+      | any (matchField event) matches -> Just f
+      | otherwise -> Nothing
 
 getTagsFromFields :: LogEvent -> Metric -> [(Text, Text)]
 getTagsFromFields event (Metric {tagsFromFields}) =
   [ (tag, fromMaybe "null" (lookupString field event))
   | (tag, field) <- HashMap.toList tagsFromFields ]
 
-matchingMetrics :: LogEvent -> [Metric] -> [CounterKey]
+matchingMetrics :: LogEvent -> [Metric] -> [(CounterKey, Int64 -> Int64)]
 matchingMetrics event metrics =
-  [ CounterKey (name m) (getTagsFromFields event m)
-  | m <- metrics, matchMetric event m ]
+  let key m = CounterKey (name m) (getTagsFromFields event m) in
+  catMaybes $ map (\m -> (key m,) <$> matchMetric event m) metrics
 
 ------------------------------------------------------------------------------
 -- Server
@@ -224,8 +245,8 @@ handleLogEvent counters metrics body = do
     case Aeson.eitherDecode body of
       Left err -> putStrLn err
       Right (Aeson.Object event) -> do
-        let keys = matchingMetrics event metrics
-        mapM_ (bumpCounter counters) keys
+        let matches = matchingMetrics event metrics
+        mapM_ (bumpCounter counters) matches
       _ -> putStrLn "Received a non-object"
 
 server :: Config -> Counters -> IO ()
