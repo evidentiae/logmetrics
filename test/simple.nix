@@ -97,6 +97,7 @@ in {
       query_metrics 'sum:foo.bar.scsi.count' > metrics-scsi.json
       query_metrics 'sum:problem.count' > metrics-problem.json
       query_metrics 'sum:problem.count{service=bosun.service}' > metrics-problem-bosun.json
+      query_metrics 'sum:problem.count{service=hbase.service}' > metrics-problem-hbase.json
         #'sum:nginx.request.count{path=*,host=*,servername=*}'
     }
 

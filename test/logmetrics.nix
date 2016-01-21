@@ -27,7 +27,7 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
                   "value": "scsi"
                 }],
                 "tags": {"type": "hw"},
-                "tagsFromFields": {"hostname": "host"}
+                "tagsFromFields": {"hostname": "host", "missing": "foobarqux"}
               },
               {
                 "name": "problem.count",
