@@ -28,6 +28,7 @@ import Control.Monad.Trans.State.Strict
 import GHC.Generics
 import STMContainers.Map (Map)
 import System.Environment
+import System.IO
 import Text.Read
 import Web.Scotty (ScottyM)
 
@@ -312,6 +313,7 @@ startServer config counters = do
 
 main :: IO ()
 main = do
+  hSetBuffering stdout LineBuffering
   putStrLn "Loading config..."
   config <- loadConfig
   putStrLn "Finished loading config"
