@@ -9,6 +9,7 @@ executable logmetrics
   main-is:             Main.hs
   ghc-options:         -Wall -threaded -O3
   build-depends:       base,
+                       extra,
                        transformers,
                        bytestring,
                        deepseq,

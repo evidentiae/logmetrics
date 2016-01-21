@@ -4,6 +4,7 @@
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
+{-# LANGUAGE BangPatterns #-}
 
 import Data.Aeson (FromJSON, ToJSON, (.=))
 import Data.Bifunctor
@@ -21,7 +22,9 @@ import Control.Concurrent.STM
 import Control.DeepSeq
 import Control.Lens hiding ((.=))
 import Control.Monad
+import Control.Monad.Extra
 import Control.Monad.IO.Class
+import Control.Monad.Trans.State.Strict
 import GHC.Generics
 import STMContainers.Map (Map)
 import System.Environment
@@ -32,6 +35,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as Text
+import qualified Data.Text.IO as Text
 import qualified ListT as ListT
 import qualified Network.Wreq as Wreq
 import qualified STMContainers.Map as Map
@@ -176,57 +180,96 @@ metricsThread config counters = forever $ do
 -- Matching
 ------------------------------------------------------------------------------
 
-lookupString :: Text -> HashMap Text Aeson.Value -> Maybe Text
-lookupString key fields =
+-- Logging and IO, using StateT instead of the broken WriterT
+type LogIO a = StateT [Text] IO a
+
+say :: Text -> LogIO ()
+say !txt = modify' (txt :)
+
+matchError :: Show a => Text -> Text -> a -> LogIO (Maybe b)
+matchError msg key val = do
+  say (msg <> " Not matching. " <> toS (show key) <> ": " <> toS (show val))
+  pure Nothing
+
+matchStringField :: Text -> LogEvent -> LogIO (Maybe Text)
+matchStringField key fields =
   case HashMap.lookup key fields of
-    Nothing -> Nothing
-    Just (Aeson.String str) -> Just str
-    _ -> error "we only support matching/tagging on string fields"
+    Nothing -> pure Nothing
+    Just (Aeson.String str) -> pure (Just str)
+    Just val -> matchError "Non-string fields not supported." key val
 
-lookupInt :: Text -> HashMap Text Aeson.Value -> Maybe Int64
-lookupInt field event = do
-  str <- lookupString field event
-  fromMaybe
-    (error "value of matching count field cannot be parsed as an integer")
-    (readMaybe (toS str))
-
-matchField :: LogEvent -> FieldMatch -> Bool
-matchField event (FieldMatch {match, field, value}) =
-  case lookupString field event of
-    Nothing -> False
+matchIntStringField :: Text -> LogEvent -> LogIO (Maybe Int64)
+matchIntStringField key event = do
+  mStr <- matchStringField key event
+  case mStr of
+    Nothing -> pure Nothing
     Just str ->
+      case readMaybe (toS str) of
+        Nothing -> matchError "Couldn't parse string field as integer." key str
+        n -> pure n
+
+matchField :: LogEvent -> FieldMatch -> LogIO Bool
+matchField event (FieldMatch {match, field, value}) = do
+  mStr <- matchStringField field event
+  case mStr of
+    Nothing -> pure False
+    Just str -> pure $
       case match of
         "exact" -> value == str
         "contains" -> value `Text.isInfixOf` str
         _ -> error "unsupported match type"
 
-matchMetric :: LogEvent -> Metric -> Maybe (Int64 -> Int64)
-matchMetric event (Metric {matches, incrementBy, count}) =
-  let counterFun =
-        case (incrementBy, count) of
-          (Nothing, Nothing) -> Just (+1)
-          (Just field, _) -> (+) <$> lookupInt field event
-          (Nothing, Just field) -> const <$> lookupInt field event
-  in
+matchCountingDef :: LogEvent -> Maybe Text -> Maybe Text -> LogIO (Maybe (Int64 -> Int64))
+matchCountingDef event incrementBy count =
+  case (incrementBy, count) of
+    (Nothing, Nothing) -> pure (Just (+1))
+    (Just field, _) -> apply (+) field
+    (Nothing, Just field) -> apply const field
+  where
+    apply f field = do
+      mN <- matchIntStringField field event
+      case mN of
+        Nothing -> pure Nothing
+        Just n -> pure (Just (f n))
+
+matchMetric :: LogEvent -> Metric -> LogIO (Maybe (Int64 -> Int64))
+matchMetric event (Metric {matches, incrementBy, count}) = do
+  counterFun <- matchCountingDef event incrementBy count
   case counterFun of
-    Nothing -> Nothing
-    Just f
-      | any (matchField event) matches -> Just f
-      | otherwise -> Nothing
+    Nothing -> pure Nothing
+    Just f -> do
+      match <- anyM (matchField event) matches
+      pure (if match then Just f else Nothing)
 
-getTagsFromFields :: LogEvent -> Metric -> [(Text, Text)]
+getTagsFromFields :: LogEvent -> Metric -> LogIO [(Text, Text)]
 getTagsFromFields event (Metric {tagsFromFields}) =
-  [ (tag, fromMaybe "null" (lookupString field event))
-  | (tag, field) <- HashMap.toList tagsFromFields ]
+  forM (HashMap.toList tagsFromFields) $ \(tagk, field) -> do
+    mStr <- matchStringField field event
+    let tagv = fromMaybe "null" mStr
+    pure (tagk, tagv)
 
-matchingMetrics :: LogEvent -> [Metric] -> [(CounterKey, Int64 -> Int64)]
-matchingMetrics event metrics =
-  let key m = CounterKey (name m) (getTagsFromFields event m) in
-  catMaybes $ map (\m -> (key m,) <$> matchMetric event m) metrics
+matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Int64 -> Int64)]
+matchingMetrics event metrics = do
+  matches <- forM metrics $ \m -> do
+    mF <- matchMetric event m
+    tags <- getTagsFromFields event m
+    let key = CounterKey (name m) tags
+    pure ((key,) <$> mF)
+  pure (catMaybes matches)
 
 ------------------------------------------------------------------------------
 -- Server
 ------------------------------------------------------------------------------
+
+handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> LogIO ()
+handleLogEvent counters metrics body = do
+  if BL.null body then say "Received empty body" else
+    case Aeson.eitherDecode body of
+      Left err -> say ("Aeson decode error: " <> Text.pack err)
+      Right (Aeson.Object event) -> do
+        matches <- matchingMetrics event metrics
+        liftIO $ mapM_ (bumpCounter counters) matches
+      _ -> say "Received a non-object"
 
 sourcesInBulk :: BL.ByteString -> [BL.ByteString]
 sourcesInBulk body = go (BL.split 0x0a body)
@@ -236,18 +279,10 @@ sourcesInBulk body = go (BL.split 0x0a body)
     go (_index : source : objs) = source : go objs
 
 handleBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
-handleBulk counters metrics body =
-  mapM_ (handleLogEvent counters metrics) (sourcesInBulk body)
-
-handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> IO ()
-handleLogEvent counters metrics body = do
-  if BL.null body then putStrLn "Received empty body" else
-    case Aeson.eitherDecode body of
-      Left err -> putStrLn err
-      Right (Aeson.Object event) -> do
-        let matches = matchingMetrics event metrics
-        mapM_ (bumpCounter counters) matches
-      _ -> putStrLn "Received a non-object"
+handleBulk counters metrics body = do
+  let bulk = mapM_ (handleLogEvent counters metrics) (sourcesInBulk body)
+  logs <- execStateT bulk []
+  mapM_ Text.putStrLn logs
 
 server :: Config -> Counters -> IO ()
 server (Config {port, logHost, logPort, metrics}) counters =

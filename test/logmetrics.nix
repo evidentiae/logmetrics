@@ -62,7 +62,6 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
       };
       serviceConfig = {
         ExecStart = "${logmetrics}/bin/logmetrics";
-        ListenPort = 9100;
         Restart = "always";
       };
     };
