@@ -10,7 +10,7 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
     systemd.sockets.logmetrics = {
       wantedBy = [ "sockets.target" ];
       socketConfig = {
-        ListenStream = "logserver:9100";
+        ListenStream = "0.0.0.0:9100";
         # Setup socket similar to how Warp does it
         Backlog = 2048;
         NoDelay = true;
