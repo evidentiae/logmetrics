@@ -44,22 +44,7 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
                   {
                     "match": "contains",
                     "field": "message",
-                    "value": "Error"
-                  },
-                  {
-                    "match": "contains",
-                    "field": "message",
                     "value": "error"
-                  },
-                  {
-                    "match": "contains",
-                    "field": "message",
-                    "value": "Warning"
-                  },
-                  {
-                    "match": "contains",
-                    "field": "message",
-                    "value": "WARN"
                   }
                 ],
                 "tags": {"environment": "test"},
