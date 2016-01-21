@@ -7,8 +7,17 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
 {
 
   config = {
+    systemd.sockets.logmetrics = {
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "logserver:9100";
+        # Setup socket similar to how Warp does it
+        Backlog = 2048;
+        NoDelay = true;
+      };
+    };
+
     systemd.services.logmetrics = {
-      wantedBy = [ "multi-user.target" ];
       environment = {
         LOGMETRICS_CONFIG = pkgs.writeText "logmetrics.json" ''
           {
@@ -61,8 +70,13 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
         '';
       };
       serviceConfig = {
+        RestartSec = "10s";
+        ListenPort = 9100;
         ExecStart = "${logmetrics}/bin/logmetrics";
-        Restart = "always";
+        # GHC expects all sockets to be non-blocking. If false (the default),
+        # warp will simply not produce any output (if using sockets from systemd)
+        # Hinted in http://www.yesodweb.com/blog/2012/10/avoid-syscall
+        NonBlocking = true;
       };
     };
   };

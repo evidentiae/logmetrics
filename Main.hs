@@ -29,6 +29,7 @@ import GHC.Generics
 import STMContainers.Map (Map)
 import System.Environment
 import Text.Read
+import Web.Scotty (ScottyM)
 
 import qualified Data.Aeson as Aeson
 import qualified Data.ByteString as B
@@ -37,8 +38,10 @@ import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
 import qualified ListT as ListT
+import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wreq as Wreq
 import qualified STMContainers.Map as Map
+import qualified System.Systemd.Daemon as Systemd
 import qualified Web.Scotty as Scotty
 
 ------------------------------------------------------------------------------
@@ -278,23 +281,30 @@ sourcesInBulk body = go (BL.split 0x0a body)
     go (_index : []) = []
     go (_index : source : objs) = source : go objs
 
-handleBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
-handleBulk counters metrics body = do
+processBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
+processBulk counters metrics body = do
   let bulk = mapM_ (handleLogEvent counters metrics) (sourcesInBulk body)
   logs <- execStateT bulk []
   mapM_ Text.putStrLn logs
 
-server :: Config -> Counters -> IO ()
-server (Config {port, logHost, logPort, metrics}) counters =
-  let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk" in
-  Scotty.scotty port $ do
-    Scotty.post "/_bulk" $ do
-      body <- Scotty.body
-      _ <- liftIO $ forkIO $ (handleBulk counters metrics body)
-      r <- liftIO $ Wreq.post logUrl body
-      Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
-      Scotty.raw (r ^. Wreq.responseBody)
-    Scotty.matchAny "/" $ Scotty.text "" -- fluentd sends HEAD /
+server :: Config -> Counters -> ScottyM ()
+server (Config {logHost, logPort, metrics}) counters = do
+  Scotty.post "/_bulk" $ do
+    body <- Scotty.body
+    _ <- liftIO $ forkIO $ (processBulk counters metrics body)
+    let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
+    r <- liftIO $ Wreq.post logUrl body
+    Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
+    Scotty.raw (r ^. Wreq.responseBody)
+  Scotty.matchAny "/" $ Scotty.text "" -- fluentd sends HEAD /
+
+startServer :: Config -> Counters -> IO ()
+startServer config counters = do
+  sockets <- Systemd.getActivatedSockets
+  app <- Scotty.scottyApp (server config counters)
+  case sockets of
+    Just (sock:_) -> Warp.runSettingsSocket Warp.defaultSettings sock app
+    _ -> Warp.run (port config) app
 
 ------------------------------------------------------------------------------
 -- Entry point
@@ -307,4 +317,4 @@ main = do
   putStrLn "Finished loading config"
   counters <- Map.newIO
   _ <- forkIO (metricsThread config counters)
-  server config counters
+  startServer config counters
