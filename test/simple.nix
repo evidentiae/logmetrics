@@ -94,8 +94,10 @@ in {
 
       list_metrics > metrics-names.json
 
-      #query_metrics > metrics.json \
-      #  'sum:nginx.request.count{path=*,host=*,servername=*}'
+      query_metrics 'sum:foo.bar.scsi.count' > metrics-scsi.json
+      query_metrics 'sum:problem.count' > metrics-problem.json
+      query_metrics 'sum:problem.count{service=bosun.service}' > metrics-problem-bosun.json
+        #'sum:nginx.request.count{path=*,host=*,servername=*}'
     }
 
     trap dump_logs SIGINT SIGTERM EXIT
@@ -108,8 +110,6 @@ in {
 
     # Give logs and metrics some time to flush
     sleep 30
-
-    list_metrics 
   '';
 
 }

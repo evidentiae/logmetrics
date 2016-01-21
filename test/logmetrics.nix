@@ -18,16 +18,45 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
             "metricsHost": "logserver",
             "metricsPort": 8070,
             "metricsInterval": 3000,
-            "metrics": [{
-              "name": "scsi",
-              "matches": [{
-                "match": "contains",
-                "field": "kernel_device",
-                "value": "scsi"
-              }],
-              "tags": {"type": "hw"},
-              "tagsFromFields": {"hostname": "host"}
-            }]
+            "metrics": [
+              {
+                "name": "foo.bar.scsi.count",
+                "matches": [{
+                  "match": "contains",
+                  "field": "kernel_device",
+                  "value": "scsi"
+                }],
+                "tags": {"type": "hw"},
+                "tagsFromFields": {"hostname": "host"}
+              },
+              {
+                "name": "problem.count",
+                "matches": [
+                  {
+                    "match": "contains",
+                    "field": "message",
+                    "value": "Error"
+                  },
+                  {
+                    "match": "contains",
+                    "field": "message",
+                    "value": "error"
+                  },
+                  {
+                    "match": "contains",
+                    "field": "message",
+                    "value": "Warning"
+                  },
+                  {
+                    "match": "contains",
+                    "field": "message",
+                    "value": "WARN"
+                  }
+                ],
+                "tags": {"environment": "test"},
+                "tagsFromFields": {"service": "systemd_unit", "pid": "pid"}
+              }
+            ]
           }
         '';
       };
