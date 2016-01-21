@@ -242,7 +242,7 @@ matchMetric event (Metric {matches, incrementBy, count}) = do
   case counterFun of
     Nothing -> pure Nothing
     Just f -> do
-      match <- anyM (matchField event) matches
+      match <- allM (matchField event) matches
       pure (if match then Just f else Nothing)
 
 getTagsFromFields :: LogEvent -> Metric -> LogIO [(Text, Text)]
