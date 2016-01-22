@@ -85,7 +85,7 @@ instance FromJSON Metric where
       matches = matchFld <|> matchAny <|> matchAll
     in
     Metric <$>
-      (o .: "name") <*>
+      o .: "name" <*>
       matches <*>
       o .:? "setTags" <*>
       o .:? "mapTags" <*>
