@@ -5,9 +5,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE FlexibleInstances #-}
 
 import Data.Aeson (FromJSON, ToJSON, (.=), (.:), (.:?))
-import Data.Bifunctor
 import Data.Char
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
@@ -20,7 +20,6 @@ import Data.Time.Clock.POSIX
 import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
-import Control.DeepSeq
 import Control.Lens hiding ((.=))
 import Control.Monad
 import Control.Monad.Extra
@@ -29,6 +28,7 @@ import Control.Monad.Trans.State.Strict
 import GHC.Generics
 import STMContainers.Map (Map)
 import System.Environment
+import System.Exit
 import System.IO
 import Text.Read
 import Web.Scotty (ScottyM)
@@ -51,16 +51,14 @@ import qualified Web.Scotty as Scotty
 -- Config
 ------------------------------------------------------------------------------
 
-type MetricName = Text
-
 data FieldMatch = FieldMatch
   { match :: Text -- match type: "exact" or "contains"
   , field :: Text
   , value :: Text
-  } deriving (Generic, FromJSON, NFData)
+  } deriving (Generic, FromJSON)
 
 data Match = MatchField FieldMatch | MatchAny [Match] | MatchAll [Match]
-  deriving (Generic, NFData)
+  deriving Generic
 
 instance FromJSON Match where
   parseJSON = Aeson.genericParseJSON Aeson.defaultOptions
@@ -69,14 +67,14 @@ instance FromJSON Match where
     }
 
 data Metric = Metric
-  { name :: MetricName
+  { name :: Name
   , matches :: Match
-  , setTags :: Maybe (HashMap Text Text)
-  , mapTags :: Maybe (HashMap Text Text)
-  , inheritTags :: Maybe [Text]
+  , setTags :: Maybe (HashMap Name Text)
+  , mapTags :: Maybe (HashMap Name Text)
+  , inheritTags :: Maybe [Name]
   , incrementBy :: Maybe Text
   , count :: Maybe Text
-  } deriving (Generic, NFData)
+  } deriving Generic
 
 instance FromJSON Metric where
   parseJSON = Aeson.withObject "metric" $ \o ->
@@ -87,7 +85,7 @@ instance FromJSON Metric where
       matches = matchFld <|> matchAny <|> matchAll
     in
     Metric <$>
-      o .: "name" <*>
+      (o .: "name") <*>
       matches <*>
       o .:? "setTags" <*>
       o .:? "mapTags" <*>
@@ -103,29 +101,11 @@ data Config = Config
   , metricsPort :: Int
   , metricsInterval :: Int -- milliseconds
   , metrics :: [Metric]
-  } deriving (Generic, FromJSON, NFData)
+  } deriving (Generic, FromJSON)
 
-validChar :: Char -> Char
-validChar c
-  | isAlpha c || isDigit c || c `elem` ['-', '_', '.', '/'] = c
-  | otherwise = error ("Forbidden character in tag/metric name: " ++ [c])
-
-validName :: Text -> Text
-validName str = Text.map validChar str
-
-validTags :: HashMap Text Text -> HashMap Text Text
-validTags = HashMap.fromList . map (first validName) . HashMap.toList
-
-validMetric :: Metric -> Metric
-validMetric m@(Metric {name, setTags, mapTags, inheritTags}) =
-  if nbTags == 0 then
-    error "A metric must have at least one tag"
-  else
-    m { name = validName name
-      , setTags = validTags <$> setTags
-      , mapTags = validTags <$> mapTags
-      , inheritTags = map validName <$> inheritTags
-      }
+validateMetric :: Metric -> IO ()
+validateMetric (Metric {setTags, mapTags, inheritTags}) =
+  when (nbTags == 0) (die "A metric must have at least one tag")
   where
     nbTags = sum
       [ maybe 0 HashMap.size setTags
@@ -133,8 +113,8 @@ validMetric m@(Metric {name, setTags, mapTags, inheritTags}) =
       , maybe 0 length inheritTags
       ]
 
-validConfig :: Config -> Config
-validConfig c = c {metrics = map validMetric (metrics c)}
+validateConfig :: Config -> IO ()
+validateConfig c = mapM_ validateMetric (metrics c)
 
 loadConfig :: IO Config
 loadConfig = do
@@ -142,20 +122,56 @@ loadConfig = do
   json <- B.readFile configPath
   case Aeson.eitherDecodeStrict json of
     Left err -> error err
-    Right config -> pure $!! validConfig config
+    Right config -> do
+      validateConfig config
+      pure config
 
 ------------------------------------------------------------------------------
 -- Log and metric types
 ------------------------------------------------------------------------------
 
+-- | OpenTSDB metric/tag name
+newtype Name = Name Text deriving (Eq, Generic, Hashable)
+
+validChar :: Char -> Aeson.Parser ()
+validChar c
+  | isAlpha c || isDigit c || c `elem` ['-', '_', '.', '/'] = pure ()
+  | otherwise = fail ("Forbidden character in tag/metric name: " ++ [c])
+
+validName :: Text -> Aeson.Parser Name
+validName txt = mapM_ validChar (Text.unpack txt) >> pure (Name txt)
+
+instance FromJSON Name where
+  parseJSON = Aeson.withText "metric name" validName
+
+instance ToJSON Name where
+  toJSON (Name s) = Aeson.toJSON s
+  toEncoding (Name s) = Aeson.toEncoding s
+
+-- | Transform the keys and values of a 'H.HashMap'.
+mapKeyVal :: (Eq k2, Hashable k2) => (k1 -> k2) -> (v1 -> v2) -> HashMap k1 v1 -> HashMap k2 v2
+mapKeyVal fk kv = HashMap.foldrWithKey (\k v -> HashMap.insert (fk k) (kv v)) HashMap.empty
+{-# INLINE mapKeyVal #-}
+
+-- | Transform the keys of a 'H.HashMap'.
+mapKey :: (Eq k2, Hashable k2) => (k1 -> k2) -> HashMap k1 v -> HashMap k2 v
+mapKey fk = mapKeyVal fk id
+{-# INLINE mapKey #-}
+
+instance FromJSON (HashMap Name Text) where
+  parseJSON v = mapKey Name <$> Aeson.parseJSON v
+
+instance ToJSON (HashMap Name Text) where
+  toJSON m = Aeson.object [(k, Aeson.String v) | (Name k, v) <- HashMap.toList m]
+
 type LogEvent = HashMap Text Aeson.Value
 
 -- | OpenTSDB DataPoint
 data DataPoint = DataPoint
-  { dpMetric :: Text
+  { dpMetric :: Name
   , dpTimestamp :: Int64
   , dpValue :: Int64
-  , dpTags :: HashMap Text Text
+  , dpTags :: HashMap Name Text
   } deriving Generic
 
 instance ToJSON DataPoint where
@@ -171,8 +187,8 @@ instance ToJSON DataPoint where
 ------------------------------------------------------------------------------
 
 data CounterKey = CounterKey
-  { metricName :: MetricName
-  , tags :: [(Text, Text)]
+  { metricName :: Name
+  , tags :: [(Name, Text)]
   } deriving (Generic, Hashable, Eq)
 
 type Counters = Map CounterKey Int64
@@ -286,9 +302,9 @@ matchMetric event (Metric {matches, incrementBy, count}) = do
       b <- matchRec event matches
       pure (if b then Just f else Nothing)
 
-getDynamicTags :: LogEvent -> Metric -> LogIO [(Text, Text)]
+getDynamicTags :: LogEvent -> Metric -> LogIO [(Name, Text)]
 getDynamicTags event (Metric {mapTags, inheritTags}) = do
-  let inheritTags' = map (\x -> (x,x)) (fromMaybe [] inheritTags)
+  let inheritTags' = map (\n@(Name x) -> (n, x)) (fromMaybe [] inheritTags)
   let mapTags' = maybe [] HashMap.toList mapTags
   forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
     mStr <- matchStringField field event
