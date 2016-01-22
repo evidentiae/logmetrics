@@ -6,7 +6,7 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
 
-import Data.Aeson (FromJSON, ToJSON, (.=))
+import Data.Aeson (FromJSON, ToJSON, (.=), (.:), (.:?))
 import Data.Bifunctor
 import Data.Char
 import Data.Hashable
@@ -17,6 +17,7 @@ import Data.Monoid
 import Data.String.Conv
 import Data.Text (Text)
 import Data.Time.Clock.POSIX
+import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
 import Control.DeepSeq
@@ -33,6 +34,7 @@ import Text.Read
 import Web.Scotty (ScottyM)
 
 import qualified Data.Aeson as Aeson
+import qualified Data.Aeson.Types as Aeson
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HashMap
@@ -49,22 +51,47 @@ import qualified Web.Scotty as Scotty
 -- Config
 ------------------------------------------------------------------------------
 
+type MetricName = Text
+
 data FieldMatch = FieldMatch
   { match :: Text -- match type: "exact" or "contains"
   , field :: Text
   , value :: Text
   } deriving (Generic, FromJSON, NFData)
 
-type MetricName = Text
+data Match = MatchField FieldMatch | MatchAny [Match] | MatchAll [Match]
+  deriving (Generic, NFData)
+
+instance FromJSON Match where
+  parseJSON = Aeson.genericParseJSON Aeson.defaultOptions
+    { Aeson.constructorTagModifier = \(c:cs) -> toLower c : cs
+    , Aeson.sumEncoding = Aeson.ObjectWithSingleField
+    }
 
 data Metric = Metric
   { name :: MetricName
-  , matches :: [FieldMatch]
+  , matches :: Match
   , tags :: HashMap Text Text
   , tagsFromFields :: HashMap Text Text
   , incrementBy :: Maybe Text
   , count :: Maybe Text
-  } deriving (Generic, FromJSON, NFData)
+  } deriving (Generic, NFData)
+
+instance FromJSON Metric where
+  parseJSON = Aeson.withObject "metric" $ \o ->
+    let
+      matchFld = MatchField <$> o .: "matchField"
+      matchAny = MatchAny <$> o .: "matchAny"
+      matchAll = MatchAll <$> o .: "matchAll"
+      matches = matchFld <|> matchAny <|> matchAll
+    in
+    Metric <$>
+      o .: "name" <*>
+      matches <*>
+      o .: "tags" <*>
+      o .: "tagsFromFields" <*>
+      o .:? "incrementBy" <*>
+      o .:? "count"
 
 data Config = Config
   { port :: Int
@@ -236,14 +263,19 @@ matchCountingDef event incrementBy count =
         Nothing -> pure Nothing
         Just n -> pure (Just (f n))
 
+matchRec :: LogEvent -> Match -> LogIO Bool
+matchRec event (MatchField m) = matchField event m
+matchRec event (MatchAny ms) = anyM (matchRec event) ms
+matchRec event (MatchAll ms) = allM (matchRec event) ms
+
 matchMetric :: LogEvent -> Metric -> LogIO (Maybe (Int64 -> Int64))
 matchMetric event (Metric {matches, incrementBy, count}) = do
   counterFun <- matchCountingDef event incrementBy count
   case counterFun of
     Nothing -> pure Nothing
     Just f -> do
-      match <- allM (matchField event) matches
-      pure (if match then Just f else Nothing)
+      b <- matchRec event matches
+      pure (if b then Just f else Nothing)
 
 getTagsFromFields :: LogEvent -> Metric -> LogIO [(Text, Text)]
 getTagsFromFields event (Metric {tagsFromFields}) =

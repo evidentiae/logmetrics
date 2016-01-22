@@ -30,22 +30,21 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
             "metrics": [
               {
                 "name": "foo.bar.scsi.count",
-                "matches": [{
+                "matchField": {
                   "match": "contains",
                   "field": "kernel_device",
                   "value": "scsi"
-                }],
+                },
                 "tags": {"type": "hw"},
                 "tagsFromFields": {"hostname": "host", "missing": "foobarqux"}
               },
               {
                 "name": "problem.count",
-                "matches": [
-                  {
-                    "match": "contains",
-                    "field": "message",
-                    "value": "error"
-                  }
+                "matchAny": [
+                  {"matchField": {"match": "contains", "field": "message", "value": "error"}},
+                  {"matchField": {"match": "contains", "field": "message", "value": "Error"}},
+                  {"matchField": {"match": "contains", "field": "message", "value": "warning"}},
+                  {"matchField": {"match": "contains", "field": "message", "value": "Warning"}}
                 ],
                 "tags": {"environment": "test"},
                 "tagsFromFields": {"service": "systemd_unit", "pid": "pid"}
