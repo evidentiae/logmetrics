@@ -266,17 +266,19 @@ matchingMetrics event metrics = do
 ------------------------------------------------------------------------------
 
 handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> LogIO ()
-handleLogEvent counters metrics body = do
-  if BL.null body then say "Received empty body" else
-    case Aeson.eitherDecode body of
+handleLogEvent counters metrics source = do
+  if BL.null source then say "Received empty source" else
+    case Aeson.eitherDecode source of
       Left err -> say ("Aeson decode error: " <> Text.pack err)
       Right (Aeson.Object event) -> do
         matches <- matchingMetrics event metrics
         liftIO $ mapM_ (bumpCounter counters) matches
       _ -> say "Received a non-object"
 
-sourcesInBulk :: BL.ByteString -> [BL.ByteString]
-sourcesInBulk body = go (BL.split 0x0a body)
+sourcesInBulk :: BL.ByteString -> LogIO [BL.ByteString]
+sourcesInBulk body
+  | BL.null body = do say "Received empty body"; pure []
+  | otherwise = pure $ go (BL.split 0x0a body)
   where
     go [] = []
     go (_index : []) = []
@@ -284,7 +286,7 @@ sourcesInBulk body = go (BL.split 0x0a body)
 
 processBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
 processBulk counters metrics body = do
-  let bulk = mapM_ (handleLogEvent counters metrics) (sourcesInBulk body)
+  let bulk = mapM_ (handleLogEvent counters metrics) =<< sourcesInBulk body
   logs <- execStateT bulk []
   mapM_ Text.putStrLn logs
 
