@@ -35,8 +35,8 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
                   "field": "kernel_device",
                   "value": "scsi"
                 },
-                "tags": {"type": "hw"},
-                "tagsFromFields": {"hostname": "host", "missing": "foobarqux"}
+                "setTags": {"type": "hw"},
+                "mapTags": {"hostname": "host", "missing": "foobarqux"}
               },
               {
                 "name": "problem.count",
@@ -46,8 +46,9 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
                   {"matchField": {"match": "contains", "field": "message", "value": "warning"}},
                   {"matchField": {"match": "contains", "field": "message", "value": "Warning"}}
                 ],
-                "tags": {"environment": "test"},
-                "tagsFromFields": {"service": "systemd_unit", "pid": "pid"}
+                "setTags": {"environment": "test"},
+                "mapTags": {"service": "systemd_unit"},
+                "inheritTags": ["pid"]
               }
             ]
           }

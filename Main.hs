@@ -71,8 +71,9 @@ instance FromJSON Match where
 data Metric = Metric
   { name :: MetricName
   , matches :: Match
-  , tags :: HashMap Text Text
-  , tagsFromFields :: HashMap Text Text
+  , setTags :: Maybe (HashMap Text Text)
+  , mapTags :: Maybe (HashMap Text Text)
+  , inheritTags :: Maybe [Text]
   , incrementBy :: Maybe Text
   , count :: Maybe Text
   } deriving (Generic, NFData)
@@ -88,8 +89,9 @@ instance FromJSON Metric where
     Metric <$>
       o .: "name" <*>
       matches <*>
-      o .: "tags" <*>
-      o .: "tagsFromFields" <*>
+      o .:? "setTags" <*>
+      o .:? "mapTags" <*>
+      o .:? "inheritTags" <*>
       o .:? "incrementBy" <*>
       o .:? "count"
 
@@ -115,11 +117,21 @@ validTags :: HashMap Text Text -> HashMap Text Text
 validTags = HashMap.fromList . map (first validName) . HashMap.toList
 
 validMetric :: Metric -> Metric
-validMetric m =
-  m { name = validName (name m)
-    , tags = validTags (tags m)
-    , tagsFromFields = validTags (tagsFromFields m)
-    }
+validMetric m@(Metric {name, setTags, mapTags, inheritTags}) =
+  if nbTags == 0 then
+    error "A metric must have at least one tag"
+  else
+    m { name = validName name
+      , setTags = validTags <$> setTags
+      , mapTags = validTags <$> mapTags
+      , inheritTags = map validName <$> inheritTags
+      }
+  where
+    nbTags = sum
+      [ maybe 0 HashMap.size setTags
+      , maybe 0 HashMap.size mapTags
+      , maybe 0 length inheritTags
+      ]
 
 validConfig :: Config -> Config
 validConfig c = c {metrics = map validMetric (metrics c)}
@@ -159,8 +171,8 @@ instance ToJSON DataPoint where
 ------------------------------------------------------------------------------
 
 data CounterKey = CounterKey
-  { ckMetricName :: MetricName
-  , ckTagsFromFields :: [(Text, Text)]
+  { metricName :: MetricName
+  , tags :: [(Text, Text)]
   } deriving (Generic, Hashable, Eq)
 
 type Counters = Map CounterKey Int64
@@ -180,22 +192,21 @@ countersToList counters = atomically (ListT.toList (Map.stream counters))
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-counterToDataPoint :: HashMap MetricName Metric -> Int64 -> (CounterKey, Int64) -> DataPoint
-counterToDataPoint metricsMap timestamp (key, count) =
-  let metric = fromJust (HashMap.lookup (ckMetricName key) metricsMap) in
+counterToDataPoint :: Int64 -> (CounterKey, Int64) -> DataPoint
+counterToDataPoint timestamp (CounterKey {metricName, tags}, dpValue) =
   DataPoint
-    { dpMetric = name metric
+    { dpMetric = metricName
     , dpTimestamp = timestamp
-    , dpValue = count
-    , dpTags = HashMap.union (tags metric) (HashMap.fromList (ckTagsFromFields key))
+    , dpValue
+    , dpTags = HashMap.fromList tags
     }
 
-sendMetrics :: Config -> HashMap MetricName Metric -> Counters -> IO ()
-sendMetrics (Config {metricsHost, metricsPort}) metricsMap counters = do
+sendMetrics :: Config -> Counters -> IO ()
+sendMetrics (Config {metricsHost, metricsPort}) counters = do
   cs <- countersToList counters
   time <- getPOSIXTime
   let timestamp :: Int64 = round time -- seconds
-  let points = map (counterToDataPoint metricsMap timestamp) cs
+  let points = map (counterToDataPoint timestamp) cs
   when (not (null points)) $ do
     let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put"
     void $ liftIO $ Wreq.post url (Aeson.encode points)
@@ -203,9 +214,7 @@ sendMetrics (Config {metricsHost, metricsPort}) metricsMap counters = do
 metricsThread :: Config -> Counters -> IO ()
 metricsThread config counters = forever $ do
   threadDelay (metricsInterval config * 1000)
-  forkIO (sendMetrics config metricsMap counters)
-  where
-    metricsMap = HashMap.fromList [(name m, m) | m <- metrics config]
+  forkIO (sendMetrics config counters)
 
 ------------------------------------------------------------------------------
 -- Matching
@@ -277,9 +286,11 @@ matchMetric event (Metric {matches, incrementBy, count}) = do
       b <- matchRec event matches
       pure (if b then Just f else Nothing)
 
-getTagsFromFields :: LogEvent -> Metric -> LogIO [(Text, Text)]
-getTagsFromFields event (Metric {tagsFromFields}) =
-  forM (HashMap.toList tagsFromFields) $ \(tagk, field) -> do
+getDynamicTags :: LogEvent -> Metric -> LogIO [(Text, Text)]
+getDynamicTags event (Metric {mapTags, inheritTags}) = do
+  let inheritTags' = map (\x -> (x,x)) (fromMaybe [] inheritTags)
+  let mapTags' = maybe [] HashMap.toList mapTags
+  forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
     mStr <- matchStringField field event
     let tagv = fromMaybe "null" mStr
     pure (tagk, tagv)
@@ -288,8 +299,9 @@ matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Int64 -> Int64)]
 matchingMetrics event metrics = do
   matches <- forM metrics $ \m -> do
     mF <- matchMetric event m
-    tags <- getTagsFromFields event m
-    let key = CounterKey (name m) tags
+    let tags = maybe [] HashMap.toList (setTags m)
+    dyntags <- getDynamicTags event m
+    let key = CounterKey (name m) (tags ++ dyntags)
     pure ((key,) <$> mF)
   pure (catMaybes matches)
 
