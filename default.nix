@@ -13,5 +13,5 @@ mkDerivation {
     lens warp systemd scotty text transformers wreq stm
     string-conv hashable list-t stm-containers time
   ];
-  license = stdenv.lib.licenses.free;
+  license = stdenv.lib.licenses.mit;
 }
