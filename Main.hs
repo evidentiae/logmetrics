@@ -273,6 +273,9 @@ matchField event (FieldMatch {match, field, value}) = do
       case match of
         "exact" -> value == str
         "contains" -> value `Text.isInfixOf` str
+        "startsWith" -> value `Text.isPrefixOf` str
+        "!exact" -> value /= str
+        "!contains" -> not (value `Text.isInfixOf` str)
         _ -> error "unsupported match type"
 
 matchCountingDef :: LogEvent -> Maybe Text -> Maybe Text -> LogIO (Maybe (Int64 -> Int64))
