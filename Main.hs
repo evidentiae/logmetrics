@@ -72,13 +72,19 @@ data Metric = Metric
   , setTags :: Maybe (HashMap Name Text)
   , mapTags :: Maybe (HashMap Name Text)
   , inheritTags :: Maybe [Name]
-  , incrementBy :: Maybe Text
-  , count :: Maybe Text
+  , incrementBy :: Maybe (Text, Double)
+  , count :: Maybe (Text, Double)
   } deriving Generic
 
 instance FromJSON Metric where
   parseJSON = Aeson.withObject "metric" $ \o ->
     let
+      scaledField :: Maybe Aeson.Object -> Aeson.Parser (Maybe (Text, Double))
+      scaledField Nothing = pure Nothing
+      scaledField (Just o') = do
+        f <- o' .: "field"
+        m <- o' .: "multiplier"
+        return (Just (f, fromMaybe 1.0 m))
       matchFld = MatchField <$> o .: "matchField"
       matchAny = MatchAny <$> o .: "matchAny"
       matchAll = MatchAll <$> o .: "matchAll"
@@ -90,8 +96,8 @@ instance FromJSON Metric where
       o .:? "setTags" <*>
       o .:? "mapTags" <*>
       o .:? "inheritTags" <*>
-      o .:? "incrementBy" <*>
-      o .:? "count"
+      ((o .:? "incrementBy") >>= scaledField) <*>
+      ((o .:? "count") >>= scaledField)
 
 data Config = Config
   { port :: Int
@@ -254,14 +260,14 @@ matchStringField key fields =
     Just (Aeson.String str) -> pure (Just str)
     Just val -> matchError "Non-string fields not supported." key val
 
-matchIntStringField :: Text -> LogEvent -> LogIO (Maybe Int64)
-matchIntStringField key event = do
+matchDoubleStringField :: Text -> LogEvent -> LogIO (Maybe Double)
+matchDoubleStringField key event = do
   mStr <- matchStringField key event
   case mStr of
     Nothing -> pure Nothing
     Just str ->
       case readMaybe (toS str) of
-        Nothing -> matchError "Couldn't parse string field as integer." key str
+        Nothing -> matchError "Couldn't parse string field as double." key str
         n -> pure n
 
 matchField :: LogEvent -> FieldMatch -> LogIO Bool
@@ -278,18 +284,19 @@ matchField event (FieldMatch {match, field, value}) = do
         "!contains" -> not (value `Text.isInfixOf` str)
         _ -> error "unsupported match type"
 
-matchCountingDef :: LogEvent -> Maybe Text -> Maybe Text -> LogIO (Maybe (Int64 -> Int64))
+matchCountingDef :: LogEvent -> Maybe (Text, Double) -> Maybe (Text, Double) -> LogIO (Maybe (Int64 -> Int64))
 matchCountingDef event incrementBy count =
   case (incrementBy, count) of
     (Nothing, Nothing) -> pure (Just (+1))
-    (Just field, _) -> apply (+) field
-    (Nothing, Just field) -> apply const field
+    (Just (field, mul), _) -> apply (+) mul field
+    (Nothing, Just (field, mul)) -> apply const mul field
   where
-    apply f field = do
-      mN <- matchIntStringField field event
+    apply :: (Int64 -> Int64 -> Int64) -> Double -> Text -> LogIO (Maybe (Int64 -> Int64))
+    apply f mul field = do
+      mN <- matchDoubleStringField field event
       case mN of
         Nothing -> pure Nothing
-        Just n -> pure (Just (f n))
+        Just n -> pure (Just (f (round (mul*n))))
 
 matchRec :: LogEvent -> Match -> LogIO Bool
 matchRec event (MatchField m) = matchField event m
