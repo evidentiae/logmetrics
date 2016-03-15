@@ -305,12 +305,8 @@ matchRec event (MatchAll ms) = allM (matchRec event) ms
 
 matchMetric :: LogEvent -> Metric -> LogIO (Maybe (Int64 -> Int64))
 matchMetric event (Metric {matches, incrementBy, count}) = do
-  counterFun <- matchCountingDef event incrementBy count
-  case counterFun of
-    Nothing -> pure Nothing
-    Just f -> do
-      b <- matchRec event matches
-      pure (if b then Just f else Nothing)
+  isMatch <- matchRec event matches
+  if isMatch then matchCountingDef event incrementBy count else pure Nothing
 
 getDynamicTags :: LogEvent -> Metric -> LogIO [(Name, Text)]
 getDynamicTags event (Metric {mapTags, inheritTags}) = do
