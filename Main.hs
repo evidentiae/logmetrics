@@ -83,7 +83,7 @@ instance FromJSON Metric where
       scaledField Nothing = pure Nothing
       scaledField (Just o') = do
         f <- o' .: "field"
-        m <- o' .: "multiplier"
+        m <- o' .:? "multiplier"
         return (Just (f, fromMaybe 1.0 m))
       matchFld = MatchField <$> o .: "matchField"
       matchAny = MatchAny <$> o .: "matchAny"
