@@ -40,7 +40,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HashMap
 import qualified Data.Text as Text
 import qualified Data.Text.IO as Text
-import qualified ListT as ListT
+import qualified ListT
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wreq as Wreq
 import qualified STMContainers.Map as Map
@@ -110,7 +110,7 @@ data Config = Config
   } deriving (Generic, FromJSON)
 
 validateMetric :: Metric -> IO ()
-validateMetric (Metric {setTags, mapTags, inheritTags}) =
+validateMetric Metric {setTags, mapTags, inheritTags} =
   when (nbTags == 0) (die "A metric must have at least one tag")
   where
     nbTags = sum
@@ -181,7 +181,7 @@ data DataPoint = DataPoint
   } deriving Generic
 
 instance ToJSON DataPoint where
-  toEncoding (DataPoint {dpMetric, dpTimestamp, dpValue, dpTags}) =
+  toEncoding DataPoint {dpMetric, dpTimestamp, dpValue, dpTags} =
     Aeson.pairs $
       "metric" .= dpMetric <>
       "timestamp" .= dpTimestamp <>
@@ -224,12 +224,12 @@ counterToDataPoint timestamp (CounterKey {metricName, tags}, dpValue) =
     }
 
 sendMetrics :: Config -> Counters -> IO ()
-sendMetrics (Config {metricsHost, metricsPort}) counters = do
+sendMetrics Config {metricsHost, metricsPort} counters = do
   cs <- countersToList counters
   time <- getPOSIXTime
   let timestamp :: Int64 = round time -- seconds
   let points = map (counterToDataPoint timestamp) cs
-  when (not (null points)) $ do
+  unless (null points) $ do
     let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put"
     void $ liftIO $ Wreq.post url (Aeson.encode points)
 
@@ -271,7 +271,7 @@ matchDoubleStringField key event = do
         n -> pure n
 
 matchField :: LogEvent -> FieldMatch -> LogIO Bool
-matchField event (FieldMatch {match, field, value}) = do
+matchField event FieldMatch {match, field, value} = do
   mStr <- matchStringField field event
   case mStr of
     Nothing -> pure False
@@ -304,12 +304,12 @@ matchRec event (MatchAny ms) = anyM (matchRec event) ms
 matchRec event (MatchAll ms) = allM (matchRec event) ms
 
 matchMetric :: LogEvent -> Metric -> LogIO (Maybe (Int64 -> Int64))
-matchMetric event (Metric {matches, incrementBy, count}) = do
+matchMetric event Metric {matches, incrementBy, count} = do
   isMatch <- matchRec event matches
   if isMatch then matchCountingDef event incrementBy count else pure Nothing
 
 getDynamicTags :: LogEvent -> Metric -> LogIO [(Name, Text)]
-getDynamicTags event (Metric {mapTags, inheritTags}) = do
+getDynamicTags event Metric {mapTags, inheritTags} = do
   let inheritTags' = map (\n@(Name x) -> (n, x)) (fromMaybe [] inheritTags)
   let mapTags' = maybe [] HashMap.toList mapTags
   forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
@@ -332,7 +332,7 @@ matchingMetrics event metrics = do
 ------------------------------------------------------------------------------
 
 handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> LogIO ()
-handleLogEvent counters metrics source = do
+handleLogEvent counters metrics source =
   if BL.null source then say "Received empty source" else
     case Aeson.eitherDecode source of
       Left err -> say ("Aeson decode error: " <> Text.pack err)
@@ -347,7 +347,7 @@ sourcesInBulk body
   | otherwise = pure $ go (BL.split 0x0a body)
   where
     go [] = []
-    go (_index : []) = []
+    go [_index] = []
     go (_index : source : objs) = source : go objs
 
 processBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
@@ -357,10 +357,10 @@ processBulk counters metrics body = do
   mapM_ Text.putStrLn logs
 
 server :: Config -> Counters -> ScottyM ()
-server (Config {logHost, logPort, metrics}) counters = do
+server Config {logHost, logPort, metrics} counters = do
   Scotty.post "/_bulk" $ do
     body <- Scotty.body
-    _ <- liftIO $ forkIO $ (processBulk counters metrics body)
+    _ <- liftIO $ forkIO $ processBulk counters metrics body
     let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
     r <- liftIO $ Wreq.post logUrl body
     Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
