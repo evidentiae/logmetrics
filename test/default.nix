@@ -12,7 +12,7 @@ let
 in {
 
   simple = {
-    inherit ((eval ./simple.nix).config.libvirt.test.out) output result;
+    inherit ((eval ./simple.nix).config.libvirt.test.out) out;
   };
 
 }
