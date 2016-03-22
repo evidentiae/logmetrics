@@ -52,6 +52,11 @@ in {
       };
       services.opentsdb = {
         enable = true;
+        config = ''
+          tsd.core.auto_create_metrics = true
+          tsd.http.request.enable_chunked = true
+          tsd.http.request.max_chunk = 250
+        '';
       };
       systemd.services.opentsdb.environment.JVMARGS =
         "-Dlogback.configurationFile=file://${opentsdb-logback}";

@@ -27,6 +27,8 @@ let logmetrics = pkgs.haskellPackages.callPackage ./.. {}; in
             "metricsHost": "logserver",
             "metricsPort": 8070,
             "metricsInterval": 3000,
+            "metricsMaxBodySize": 250,
+            "metricsMaxChunkSize": 100,
             "metrics": [
               {
                 "name": "foo.bar.scsi.count",

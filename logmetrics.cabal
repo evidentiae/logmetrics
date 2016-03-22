@@ -25,5 +25,10 @@ executable logmetrics
                        hashable,
                        list-t,
                        stm-containers,
-                       time
+                       time,
+                       zlib,
+                       pipes,
+                       pipes-bytestring,
+                       pipes-zlib,
+                       pipes-http
   default-language:    Haskell2010

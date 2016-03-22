@@ -6,17 +6,20 @@
 {-# LANGUAGE TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE LambdaCase #-}
 
 import Data.Aeson (FromJSON, ToJSON, (.=), (.:), (.:?))
 import Data.Char
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
 import Data.Int
+import Data.List
 import Data.Maybe
 import Data.Monoid
 import Data.String.Conv
 import Data.Text (Text)
 import Data.Time.Clock.POSIX
+import Codec.Compression.GZip
 import Control.Applicative
 import Control.Concurrent
 import Control.Concurrent.STM
@@ -35,6 +38,7 @@ import Web.Scotty (ScottyM)
 
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.Types as Aeson
+import qualified Data.ByteString.Builder as Builder
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.HashMap.Strict as HashMap
@@ -43,6 +47,9 @@ import qualified Data.Text.IO as Text
 import qualified ListT
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Network.Wreq as Wreq
+import qualified Pipes.ByteString as P
+import qualified Pipes.GZip as P
+import qualified Pipes.HTTP as P
 import qualified STMContainers.Map as Map
 import qualified System.Systemd.Daemon as Systemd
 import qualified Web.Scotty as Scotty
@@ -106,6 +113,8 @@ data Config = Config
   , metricsHost :: String
   , metricsPort :: Int
   , metricsInterval :: Int -- milliseconds
+  , metricsMaxBodySize :: Maybe Int64 -- bytes
+  , metricsMaxChunkSize :: Maybe Int64 -- bytes
   , metrics :: [Metric]
   } deriving (Generic, FromJSON)
 
@@ -152,7 +161,6 @@ instance FromJSON Name where
 
 instance ToJSON Name where
   toJSON (Name s) = Aeson.toJSON s
-  toEncoding (Name s) = Aeson.toEncoding s
 
 -- | Transform the keys and values of a 'H.HashMap'.
 mapKeyVal :: (Eq k2, Hashable k2) => (k1 -> k2) -> (v1 -> v2) -> HashMap k1 v1 -> HashMap k2 v2
@@ -181,12 +189,13 @@ data DataPoint = DataPoint
   } deriving Generic
 
 instance ToJSON DataPoint where
-  toEncoding DataPoint {dpMetric, dpTimestamp, dpValue, dpTags} =
-    Aeson.pairs $
-      "metric" .= dpMetric <>
-      "timestamp" .= dpTimestamp <>
-      "value" .= dpValue <>
-      "tags" .= dpTags
+  toJSON DataPoint {dpMetric, dpTimestamp, dpValue, dpTags} =
+    Aeson.object
+      [ "metric" .= dpMetric
+      , "timestamp" .= dpTimestamp
+      , "value" .= dpValue
+      , "tags" .= dpTags
+      ]
 
 ------------------------------------------------------------------------------
 -- Counters
@@ -223,15 +232,57 @@ counterToDataPoint timestamp (CounterKey {metricName, tags}, dpValue) =
     , dpTags = HashMap.fromList tags
     }
 
+chunkRecords :: Int64 -> [BL.ByteString] -> [BL.ByteString]
+chunkRecords n = unfoldr (\case [] -> Nothing; recs -> Just (splitRecords n recs))
+
+splitRecords :: Int64 -> [BL.ByteString] -> (BL.ByteString, [BL.ByteString])
+splitRecords maxSize records =
+  case records of
+    [] -> error "Cannot happen"
+    rec : _ | BL.length rec + 2 > maxSize ->
+      error "Fatal error: metricsMaxBodySize too small for a single datapoint"
+    _ ->
+      let (recs, rest) = go 2 mempty False records in
+      let builder = Builder.char8 '[' <> recs <> Builder.char8 ']' in
+      let chunk = Builder.toLazyByteString builder in
+      (chunk, rest)
+  where
+    go _ _ _ [] = error "Cannot happen"
+    go bytes chunk comma (rec : recs)
+      | bytes + BL.length rec > maxSize = (chunk, rec : recs)
+      | [] <- recs = (chunk <> comma_ <> Builder.lazyByteString rec, [])
+      | otherwise = go (bytes + BL.length rec + 1) (chunk <> comma_ <> Builder.lazyByteString rec) True recs
+      where comma_ | comma = Builder.char8 ','
+                   | otherwise = mempty
+
+chunkedPayload :: Int64 -> BL.ByteString -> Wreq.Payload
+chunkedPayload chunkSize =
+    Wreq.Raw "application/json"
+  . P.stream
+  . P.chunksOf' chunkSize
+  . P.compress P.defaultCompression
+  . P.fromLazy
+
 sendMetrics :: Config -> Counters -> IO ()
-sendMetrics Config {metricsHost, metricsPort} counters = do
+sendMetrics config counters = do
   cs <- countersToList counters
   time <- getPOSIXTime
   let timestamp :: Int64 = round time -- seconds
   let points = map (counterToDataPoint timestamp) cs
   unless (null points) $ do
-    let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put"
-    void $ liftIO $ Wreq.post url (Aeson.encode points)
+    let payloads =
+          case metricsMaxBodySize config of
+            Nothing -> [Aeson.encode points]
+            Just n -> chunkRecords n (map Aeson.encode points)
+    mapM_ (sendPayload config) payloads
+
+sendPayload :: Config -> BL.ByteString -> IO ()
+sendPayload Config {metricsHost, metricsPort, metricsMaxChunkSize} body =
+  let url = "http://" ++ metricsHost ++ ":" ++ show metricsPort ++ "/api/put" in
+  let opts = Wreq.defaults & Wreq.header "Content-Encoding" .~ ["gzip"] in
+  void $ case metricsMaxChunkSize of
+    Nothing -> Wreq.postWith opts url (compress body)
+    Just n -> Wreq.postWith opts url (chunkedPayload n body)
 
 metricsThread :: Config -> Counters -> IO ()
 metricsThread config counters = forever $ do
