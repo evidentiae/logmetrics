@@ -115,6 +115,7 @@ data Config = Config
   , metricsInterval :: Int -- milliseconds
   , metricsMaxBodySize :: Maybe Int64 -- bytes
   , metricsMaxChunkSize :: Maybe Int64 -- bytes
+  , metricsMaxAge :: Maybe Int64 -- seconds
   , metrics :: [Metric]
   } deriving (Generic, FromJSON)
 
@@ -140,6 +141,13 @@ loadConfig = do
     Right config -> do
       validateConfig config
       pure config
+
+------------------------------------------------------------------------------
+-- Utility functions
+------------------------------------------------------------------------------
+
+getTimestamp :: IO Int64
+getTimestamp = round <$> getPOSIXTime
 
 ------------------------------------------------------------------------------
 -- Log and metric types
@@ -206,29 +214,46 @@ data CounterKey = CounterKey
   , tags :: [(Name, Text)]
   } deriving (Generic, Hashable, Eq)
 
-type Counters = Map CounterKey Int64
+data CounterValue = CounterValue
+  { counterValue :: Int64
+  , lastChanged :: Int64
+  }
+
+type Counters = Map CounterKey CounterValue
 
 -- Creates a new counter on-the-fly if none is found
-bumpCounter :: Counters -> (CounterKey, Int64 -> Int64) -> IO ()
-bumpCounter counters (key, f) = atomically $ do
+-- Deletes counter if it is stale (with regards to metricsMaxAge)
+bumpCounter :: Maybe Int64 -> Int64 -> Counters -> (CounterKey, Int64 -> Int64) -> IO ()
+bumpCounter metricsMaxAge timestamp counters (key, f) = atomically $ do
   mCounter <- Map.lookup key counters
   case mCounter of
-    Nothing -> Map.insert (f 0) key counters
-    Just counter -> Map.insert (f counter) key counters
+    Nothing -> Map.insert (CounterValue {counterValue = f 0, lastChanged = timestamp}) key counters
+    Just (CounterValue {counterValue,lastChanged}) -> do
+      let counterValue' = f counterValue
+          lastChanged' = if counterValue' == counterValue
+                         then lastChanged
+                         else timestamp
+          value = CounterValue
+                    { counterValue = counterValue'
+                    , lastChanged = lastChanged'
+                    }
+      if maybe False (timestamp - lastChanged' >) metricsMaxAge
+      then Map.delete key counters
+      else Map.insert value key counters
 
-countersToList :: Counters -> IO [(CounterKey, Int64)]
+countersToList :: Counters -> IO [(CounterKey, CounterValue)]
 countersToList counters = atomically (ListT.toList (Map.stream counters))
 
 ------------------------------------------------------------------------------
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-counterToDataPoint :: Int64 -> (CounterKey, Int64) -> DataPoint
-counterToDataPoint timestamp (CounterKey {metricName, tags}, dpValue) =
+counterToDataPoint :: Int64 -> (CounterKey, CounterValue) -> DataPoint
+counterToDataPoint timestamp (CounterKey {metricName, tags}, CounterValue {counterValue}) =
   DataPoint
     { dpMetric = metricName
     , dpTimestamp = timestamp
-    , dpValue
+    , dpValue = counterValue
     , dpTags = HashMap.fromList tags
     }
 
@@ -266,8 +291,7 @@ chunkedPayload chunkSize =
 sendMetrics :: Config -> Counters -> IO ()
 sendMetrics config counters = do
   cs <- countersToList counters
-  time <- getPOSIXTime
-  let timestamp :: Int64 = round time -- seconds
+  timestamp <- getTimestamp
   let points = map (counterToDataPoint timestamp) cs
   unless (null points) $ do
     let payloads =
@@ -382,14 +406,16 @@ matchingMetrics event metrics = do
 -- Server
 ------------------------------------------------------------------------------
 
-handleLogEvent :: Counters -> [Metric] -> BL.ByteString -> LogIO ()
-handleLogEvent counters metrics source =
+handleLogEvent :: Config -> Counters -> [Metric] -> BL.ByteString -> LogIO ()
+handleLogEvent Config { metricsMaxAge } counters metrics source =
   if BL.null source then say "Received empty source" else
     case Aeson.eitherDecode source of
       Left err -> say ("Aeson decode error: " <> Text.pack err)
       Right (Aeson.Object event) -> do
         matches <- matchingMetrics event metrics
-        liftIO $ mapM_ (bumpCounter counters) matches
+        liftIO $ do
+          timestamp <- getTimestamp
+          mapM_ (bumpCounter metricsMaxAge timestamp counters) matches
       _ -> say "Received a non-object"
 
 sourcesInBulk :: BL.ByteString -> LogIO [BL.ByteString]
@@ -401,17 +427,17 @@ sourcesInBulk body
     go [_index] = []
     go (_index : source : objs) = source : go objs
 
-processBulk :: Counters -> [Metric] -> BL.ByteString -> IO ()
-processBulk counters metrics body = do
-  let bulk = mapM_ (handleLogEvent counters metrics) =<< sourcesInBulk body
+processBulk :: Config -> Counters -> [Metric] -> BL.ByteString -> IO ()
+processBulk config counters metrics body = do
+  let bulk = mapM_ (handleLogEvent config counters metrics) =<< sourcesInBulk body
   logs <- execStateT bulk []
   mapM_ Text.putStrLn logs
 
 server :: Config -> Counters -> ScottyM ()
-server Config {logHost, logPort, metrics} counters = do
+server (config@Config {logHost, logPort, metrics}) counters = do
   Scotty.post "/_bulk" $ do
     body <- Scotty.body
-    _ <- liftIO $ forkIO $ processBulk counters metrics body
+    _ <- liftIO $ forkIO $ processBulk config counters metrics body
     let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
     r <- liftIO $ Wreq.post logUrl body
     Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
