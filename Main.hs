@@ -16,6 +16,7 @@ import Data.Int
 import Data.List
 import Data.Maybe
 import Data.Monoid
+import Data.Scientific
 import Data.String.Conv
 import Data.Text (Text)
 import Data.Time.Clock.POSIX
@@ -80,7 +81,7 @@ data Metric = Metric
   , mapTags :: Maybe (HashMap Name Text)
   , inheritTags :: Maybe [Name]
   , incrementBy :: Maybe (Text, Double)
-  , count :: Maybe (Text, Double)
+  , count :: Maybe (Text, Double) -- TODO: rename to 'const'?
   } deriving Generic
 
 instance FromJSON Metric where
@@ -328,29 +329,19 @@ matchError msg key val = do
   say (msg <> " Not matching. " <> toS (show key) <> ": " <> toS (show val))
   pure Nothing
 
-matchStringField :: Text -> LogEvent -> LogIO (Maybe Text)
-matchStringField key fields =
+matchTag :: Text -> LogEvent -> LogIO (Maybe Text)
+matchTag key fields =
   case HashMap.lookup key fields of
     Nothing -> pure Nothing
     Just (Aeson.String str) -> pure (Just str)
-    Just val -> matchError "Non-string fields not supported." key val
-
-matchDoubleStringField :: Text -> LogEvent -> LogIO (Maybe Double)
-matchDoubleStringField key event = do
-  mStr <- matchStringField key event
-  case mStr of
-    Nothing -> pure Nothing
-    Just str ->
-      case readMaybe (toS str) of
-        Nothing -> matchError "Couldn't parse string field as double." key str
-        n -> pure n
+    Just val -> matchError "Non-string tags are not supported." key val
 
 matchField :: LogEvent -> FieldMatch -> LogIO Bool
-matchField event FieldMatch {match, field, value} = do
-  mStr <- matchStringField field event
-  case mStr of
+matchField event FieldMatch {match, field, value} =
+  case HashMap.lookup field event of
     Nothing -> pure False
-    Just str -> pure $
+    Just (Aeson.Number _) -> pure True
+    Just (Aeson.String str) -> pure $
       case match of
         "exact" -> value == str
         "contains" -> value `Text.isInfixOf` str
@@ -358,6 +349,19 @@ matchField event FieldMatch {match, field, value} = do
         "!exact" -> value /= str
         "!contains" -> not (value `Text.isInfixOf` str)
         _ -> error "unsupported match type"
+    Just val -> const False <$> matchError "Only string or number fields supported." field val
+
+-- Matches numbers or strings that can be converted to numbers
+matchNumberishField :: Text -> LogEvent -> LogIO (Maybe Double)
+matchNumberishField key event =
+  case HashMap.lookup key event of
+    Nothing -> pure Nothing
+    Just (Aeson.Number x) -> pure (Just (toRealFloat x))
+    Just (Aeson.String str) ->
+      case readMaybe (toS str) of
+        Nothing -> matchError "Couldn't parse string field as double." key str
+        x -> pure x
+    Just val -> matchError "Only string or number fields supported." key val
 
 matchCountingDef :: LogEvent -> Maybe (Text, Double) -> Maybe (Text, Double) -> LogIO (Maybe (Int64 -> Int64))
 matchCountingDef event incrementBy count =
@@ -368,7 +372,7 @@ matchCountingDef event incrementBy count =
   where
     apply :: (Int64 -> Int64 -> Int64) -> Double -> Text -> LogIO (Maybe (Int64 -> Int64))
     apply f mul field = do
-      mN <- matchDoubleStringField field event
+      mN <- matchNumberishField field event
       case mN of
         Nothing -> pure Nothing
         Just n -> pure (Just (f (round (mul*n))))
@@ -388,7 +392,7 @@ getDynamicTags event Metric {mapTags, inheritTags} = do
   let inheritTags' = map (\n@(Name x) -> (n, x)) (fromMaybe [] inheritTags)
   let mapTags' = maybe [] HashMap.toList mapTags
   forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
-    mStr <- matchStringField field event
+    mStr <- matchTag field event
     let tagv = fromMaybe "null" mStr
     pure (tagk, tagv)
 

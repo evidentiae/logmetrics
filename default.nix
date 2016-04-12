@@ -1,7 +1,7 @@
 { mkDerivation, stdenv, aeson, base, extra, bytestring
 , unordered-containers, lens, systemd, warp, scotty, text, transformers
 , wreq, stm, string-conv, hashable, list-t, stm-containers, time
-, zlib, pipes-bytestring, pipes-zlib, pipes-http
+, zlib, pipes-bytestring, pipes-zlib, pipes-http, scientific
 }:
 mkDerivation {
   pname = "logmetrics";
@@ -14,6 +14,7 @@ mkDerivation {
     lens warp systemd scotty text transformers wreq stm
     string-conv hashable list-t stm-containers time
     zlib pipes-bytestring pipes-zlib pipes-http
+    scientific
   ];
   license = stdenv.lib.licenses.mit;
 }

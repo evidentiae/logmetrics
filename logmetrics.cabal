@@ -19,6 +19,7 @@ executable logmetrics
                        pipes-bytestring,
                        pipes-http,
                        pipes-zlib,
+                       scientific,
                        scotty,
                        stm,
                        stm-containers,
