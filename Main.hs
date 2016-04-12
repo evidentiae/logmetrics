@@ -59,7 +59,7 @@ import qualified Web.Scotty as Scotty
 ------------------------------------------------------------------------------
 
 data FieldMatch = FieldMatch
-  { match :: Text -- match type: "exact" or "contains"
+  { match :: Text
   , field :: Text
   , value :: Text
   } deriving (Generic, FromJSON)
