@@ -228,8 +228,8 @@ bumpCounter :: Maybe Int64 -> Int64 -> Counters -> (CounterKey, Int64 -> Int64) 
 bumpCounter metricsMaxAge timestamp counters (key, f) = atomically $ do
   mCounter <- Map.lookup key counters
   case mCounter of
-    Nothing -> Map.insert (CounterValue {counterValue = f 0, lastChanged = timestamp}) key counters
-    Just (CounterValue {counterValue,lastChanged}) -> do
+    Nothing -> Map.insert CounterValue {counterValue = f 0, lastChanged = timestamp} key counters
+    Just CounterValue {counterValue,lastChanged} -> do
       let counterValue' = f counterValue
           lastChanged' = if counterValue' == counterValue
                          then lastChanged
