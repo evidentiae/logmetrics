@@ -82,6 +82,8 @@ data Metric = Metric
   , inheritTags :: Maybe [Name]
   , incrementBy :: Maybe (Text, Double)
   , count :: Maybe (Text, Double) -- TODO: rename to 'const'?
+  , collectFrom :: Maybe Text
+  , collectConst :: Maybe Int64
   } deriving Generic
 
 instance FromJSON Metric where
@@ -105,7 +107,9 @@ instance FromJSON Metric where
       o .:? "mapTags" <*>
       o .:? "inheritTags" <*>
       ((o .:? "incrementBy") >>= scaledField) <*>
-      ((o .:? "count") >>= scaledField)
+      ((o .:? "count") >>= scaledField) <*>
+      o .:? "collectFrom" <*>
+      o .:? "collectConst"
 
 data Config = Config
   { port :: Int
@@ -224,8 +228,8 @@ type Counters = Map CounterKey CounterValue
 
 -- Creates a new counter on-the-fly if none is found
 -- Deletes counter if it is stale (with regards to metricsMaxAge)
-bumpCounter :: Maybe Int64 -> Int64 -> Counters -> (CounterKey, Int64 -> Int64) -> IO ()
-bumpCounter metricsMaxAge timestamp counters (key, f) = atomically $ do
+bumpCounter :: Maybe Int64 -> Int64 -> Counters -> CounterKey -> (Int64 -> Int64) -> IO ()
+bumpCounter metricsMaxAge timestamp counters key f = atomically $ do
   mCounter <- Map.lookup key counters
   case mCounter of
     Nothing -> Map.insert CounterValue {counterValue = f 0, lastChanged = timestamp} key counters
@@ -246,17 +250,50 @@ countersToList :: Counters -> IO [(CounterKey, CounterValue)]
 countersToList counters = atomically (ListT.toList (Map.stream counters))
 
 ------------------------------------------------------------------------------
+-- Buffer
+------------------------------------------------------------------------------
+
+type Buffer = MVar [(CounterKey, Int64)]
+
+addToBuffer :: Buffer -> CounterKey -> Int64 -> IO ()
+addToBuffer buffer k v = modifyMVar_ buffer (\b -> pure ((k,v) : b))
+
+------------------------------------------------------------------------------
+-- Accumulators
+------------------------------------------------------------------------------
+
+type Accumulators = (Counters, Buffer)
+
+data Action = Count (Int64 -> Int64) | Collect Int64
+
+accumulate :: Config -> Int64 -> Accumulators -> CounterKey -> Action -> IO ()
+accumulate config timestamp (counters, buffer) key = \case
+  Count f -> bumpCounter (metricsMaxAge config) timestamp counters key f
+  Collect val -> addToBuffer buffer key val
+
+------------------------------------------------------------------------------
 -- Metrics thread
 ------------------------------------------------------------------------------
 
-counterToDataPoint :: Int64 -> (CounterKey, CounterValue) -> DataPoint
-counterToDataPoint timestamp (CounterKey {metricName, tags}, CounterValue {counterValue}) =
+toDataPoint :: Int64 -> (CounterKey, Int64) -> DataPoint
+toDataPoint timestamp (CounterKey {metricName, tags}, counterValue) =
   DataPoint
     { dpMetric = metricName
     , dpTimestamp = timestamp
     , dpValue = counterValue
     , dpTags = HashMap.fromList tags
     }
+
+countersToDataPoints :: Int64 -> Counters -> IO [DataPoint]
+countersToDataPoints timestamp counters = do
+  cs <- countersToList counters
+  pure (map (\(k, CounterValue v _) -> toDataPoint timestamp (k, v)) cs)
+
+bufferToDataPoints :: Int64 -> Buffer -> IO [DataPoint]
+bufferToDataPoints timestamp buffer = do
+  buf <- takeMVar buffer
+  putMVar buffer []
+  pure (map (toDataPoint timestamp) buf)
 
 chunkRecords :: Int64 -> [BL.ByteString] -> [BL.ByteString]
 chunkRecords n = unfoldr (\case [] -> Nothing; recs -> Just (splitRecords n recs))
@@ -289,11 +326,11 @@ chunkedPayload chunkSize =
   . P.compress P.defaultCompression
   . P.fromLazy
 
-sendMetrics :: Config -> Counters -> IO ()
-sendMetrics config counters = do
-  cs <- countersToList counters
+sendMetrics :: Config -> Accumulators -> IO ()
+sendMetrics config (counters, buffer) = do
   timestamp <- getTimestamp
-  let points = map (counterToDataPoint timestamp) cs
+  points <- (++) <$> countersToDataPoints timestamp counters <*>
+                     bufferToDataPoints timestamp buffer
   unless (null points) $ do
     let payloads =
           case metricsMaxBodySize config of
@@ -309,10 +346,10 @@ sendPayload Config {metricsHost, metricsPort, metricsMaxChunkSize} body =
     Nothing -> Wreq.postWith opts url (compress body)
     Just n -> Wreq.postWith opts url (chunkedPayload n body)
 
-metricsThread :: Config -> Counters -> IO ()
-metricsThread config counters = forever $ do
+metricsThread :: Config -> Accumulators -> IO ()
+metricsThread config accs = forever $ do
   threadDelay (metricsInterval config * 1000)
-  forkIO (sendMetrics config counters)
+  forkIO (sendMetrics config accs)
 
 ------------------------------------------------------------------------------
 -- Matching
@@ -363,14 +400,17 @@ matchNumberishField key event =
         x -> pure x
     Just val -> matchError "Only string or number fields supported." key val
 
-matchCountingDef :: LogEvent -> Maybe (Text, Double) -> Maybe (Text, Double) -> LogIO (Maybe (Int64 -> Int64))
-matchCountingDef event incrementBy count =
-  case (incrementBy, count) of
-    (Nothing, Nothing) -> pure (Just (+1))
-    (Just (field, mul), _) -> apply (+) mul field
-    (Nothing, Just (field, mul)) -> apply const mul field
+matchCountingDef :: LogEvent -> Metric -> LogIO (Maybe Action)
+matchCountingDef event metric = do
+  let Metric {incrementBy, count, collectFrom, collectConst} = metric
+  case (incrementBy, count, collectFrom, collectConst) of
+    (Nothing, Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
+    (Just (field, mul), _, _, _) -> apply (Count . (+)) mul field
+    (Nothing, Just (field, mul), _, _) -> apply (Count . const) mul field
+    (Nothing, Nothing, Just field, _) -> apply Collect 1 field
+    (Nothing, Nothing, Nothing, Just x) -> pure (Just (Collect x))
   where
-    apply :: (Int64 -> Int64 -> Int64) -> Double -> Text -> LogIO (Maybe (Int64 -> Int64))
+    apply :: (Int64 -> Action) -> Double -> Text -> LogIO (Maybe Action)
     apply f mul field = do
       mN <- matchNumberishField field event
       case mN of
@@ -382,10 +422,10 @@ matchRec event (MatchField m) = matchField event m
 matchRec event (MatchAny ms) = anyM (matchRec event) ms
 matchRec event (MatchAll ms) = allM (matchRec event) ms
 
-matchMetric :: LogEvent -> Metric -> LogIO (Maybe (Int64 -> Int64))
-matchMetric event Metric {matches, incrementBy, count} = do
-  isMatch <- matchRec event matches
-  if isMatch then matchCountingDef event incrementBy count else pure Nothing
+matchMetric :: LogEvent -> Metric -> LogIO (Maybe Action)
+matchMetric event metric = do
+  isMatch <- matchRec event (matches metric)
+  if isMatch then matchCountingDef event metric else pure Nothing
 
 getDynamicTags :: LogEvent -> Metric -> LogIO [(Name, Text)]
 getDynamicTags event Metric {mapTags, inheritTags} = do
@@ -396,7 +436,7 @@ getDynamicTags event Metric {mapTags, inheritTags} = do
     let tagv = fromMaybe "null" mStr
     pure (tagk, tagv)
 
-matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Int64 -> Int64)]
+matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Action)]
 matchingMetrics event metrics = do
   matches <- forM metrics $ \m -> do
     mF <- matchMetric event m
@@ -410,8 +450,8 @@ matchingMetrics event metrics = do
 -- Server
 ------------------------------------------------------------------------------
 
-handleLogEvent :: Config -> Counters -> [Metric] -> BL.ByteString -> LogIO ()
-handleLogEvent Config { metricsMaxAge } counters metrics source =
+handleLogEvent :: Config -> Accumulators -> [Metric] -> BL.ByteString -> LogIO ()
+handleLogEvent config accs metrics source =
   if BL.null source then say "Received empty source" else
     case Aeson.eitherDecode source of
       Left err -> say ("Aeson decode error: " <> Text.pack err)
@@ -419,7 +459,7 @@ handleLogEvent Config { metricsMaxAge } counters metrics source =
         matches <- matchingMetrics event metrics
         liftIO $ do
           timestamp <- getTimestamp
-          mapM_ (bumpCounter metricsMaxAge timestamp counters) matches
+          mapM_ (uncurry $ accumulate config timestamp accs) matches
       _ -> say "Received a non-object"
 
 sourcesInBulk :: BL.ByteString -> LogIO [BL.ByteString]
@@ -431,27 +471,27 @@ sourcesInBulk body
     go [_index] = []
     go (_index : source : objs) = source : go objs
 
-processBulk :: Config -> Counters -> [Metric] -> BL.ByteString -> IO ()
-processBulk config counters metrics body = do
-  let bulk = mapM_ (handleLogEvent config counters metrics) =<< sourcesInBulk body
+processBulk :: Config -> Accumulators -> [Metric] -> BL.ByteString -> IO ()
+processBulk config accs metrics body = do
+  let bulk = mapM_ (handleLogEvent config accs metrics) =<< sourcesInBulk body
   logs <- execStateT bulk []
   mapM_ Text.putStrLn logs
 
-server :: Config -> Counters -> ScottyM ()
-server (config@Config {logHost, logPort, metrics}) counters = do
+server :: Config -> Accumulators -> ScottyM ()
+server (config@Config {logHost, logPort, metrics}) accs = do
   Scotty.post "/_bulk" $ do
     body <- Scotty.body
-    _ <- liftIO $ forkIO $ processBulk config counters metrics body
+    _ <- liftIO $ forkIO $ processBulk config accs metrics body
     let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
     r <- liftIO $ Wreq.post logUrl body
     Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
     Scotty.raw (r ^. Wreq.responseBody)
   Scotty.matchAny "/" $ Scotty.text "" -- fluentd sends HEAD /
 
-startServer :: Config -> Counters -> IO ()
-startServer config counters = do
+startServer :: Config -> Accumulators -> IO ()
+startServer config accs = do
   sockets <- Systemd.getActivatedSockets
-  app <- Scotty.scottyApp (server config counters)
+  app <- Scotty.scottyApp (server config accs)
   case sockets of
     Just (sock:_) -> Warp.runSettingsSocket Warp.defaultSettings sock app
     _ -> Warp.run (port config) app
@@ -467,5 +507,7 @@ main = do
   config <- loadConfig
   putStrLn "Finished loading config"
   counters <- Map.newIO
-  _ <- forkIO (metricsThread config counters)
-  startServer config counters
+  buffer <- newMVar []
+  let accs = (counters, buffer)
+  _ <- forkIO (metricsThread config accs)
+  startServer config accs
