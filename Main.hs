@@ -159,7 +159,7 @@ getTimestamp = round <$> getPOSIXTime
 ------------------------------------------------------------------------------
 
 -- | OpenTSDB metric/tag name
-newtype Name = Name Text deriving (Eq, Generic, Hashable)
+newtype Name = Name Text deriving (Ord, Eq, Generic, Hashable)
 
 validChar :: Char -> Aeson.Parser ()
 validChar c
@@ -199,7 +199,7 @@ data DataPoint = DataPoint
   , dpTimestamp :: Int64
   , dpValue :: Int64
   , dpTags :: HashMap Name Text
-  } deriving Generic
+  } deriving (Eq, Generic)
 
 instance ToJSON DataPoint where
   toJSON DataPoint {dpMetric, dpTimestamp, dpValue, dpTags} =
@@ -293,7 +293,12 @@ bufferToDataPoints :: Int64 -> Buffer -> IO [DataPoint]
 bufferToDataPoints timestamp buffer = do
   buf <- takeMVar buffer
   putMVar buffer []
-  pure (map (toDataPoint timestamp) buf)
+  let cmp a b = mconcat
+                  [ compare (dpMetric a) (dpMetric b)
+                  , compare (dpTimestamp a) (dpTimestamp b)
+                  , compare (dpValue a) (dpValue b)
+                  ]
+  pure (nub . sortBy cmp . map (toDataPoint timestamp) $ buf)
 
 chunkRecords :: Int64 -> [BL.ByteString] -> [BL.ByteString]
 chunkRecords n = unfoldr (\case [] -> Nothing; recs -> Just (splitRecords n recs))
