@@ -19,6 +19,7 @@ import Data.Monoid
 import Data.Scientific
 import Data.String.Conv
 import Data.Text (Text)
+import Data.Time
 import Data.Time.Clock.POSIX
 import Codec.Compression.GZip
 import Control.Applicative
@@ -151,8 +152,8 @@ loadConfig = do
 -- Utility functions
 ------------------------------------------------------------------------------
 
-getTimestamp :: IO Int64
-getTimestamp = round <$> getPOSIXTime
+mkTimestamp :: IO Int64
+mkTimestamp = round <$> getPOSIXTime
 
 ------------------------------------------------------------------------------
 -- Log and metric types
@@ -253,10 +254,10 @@ countersToList counters = atomically (ListT.toList (Map.stream counters))
 -- Buffer
 ------------------------------------------------------------------------------
 
-type Buffer = MVar [(CounterKey, Int64)]
+type Buffer = MVar [(CounterKey, Int64, Int64)]
 
-addToBuffer :: Buffer -> CounterKey -> Int64 -> IO ()
-addToBuffer buffer k v = modifyMVar_ buffer (\b -> pure ((k,v) : b))
+addToBuffer :: Buffer -> CounterKey -> Int64 -> Int64 -> IO ()
+addToBuffer buffer k t v = modifyMVar_ buffer (\b -> pure ((k,t,v) : b))
 
 ------------------------------------------------------------------------------
 -- Accumulators
@@ -264,12 +265,12 @@ addToBuffer buffer k v = modifyMVar_ buffer (\b -> pure ((k,v) : b))
 
 type Accumulators = (Counters, Buffer)
 
-data Action = Count (Int64 -> Int64) | Collect Int64
+data Action = Count (Int64 -> Int64) | Collect Int64 Int64
 
 accumulate :: Config -> Int64 -> Accumulators -> CounterKey -> Action -> IO ()
-accumulate config timestamp (counters, buffer) key = \case
-  Count f -> bumpCounter (metricsMaxAge config) timestamp counters key f
-  Collect val -> addToBuffer buffer key val
+accumulate config timestamp (counters, buffer) k = \case
+  Count f -> bumpCounter (metricsMaxAge config) timestamp counters k f
+  Collect t v -> addToBuffer buffer k t v
 
 ------------------------------------------------------------------------------
 -- Metrics thread
@@ -289,8 +290,8 @@ countersToDataPoints timestamp counters = do
   cs <- countersToList counters
   pure (map (\(k, CounterValue v _) -> toDataPoint timestamp (k, v)) cs)
 
-bufferToDataPoints :: Int64 -> Buffer -> IO [DataPoint]
-bufferToDataPoints timestamp buffer = do
+bufferToDataPoints :: Buffer -> IO [DataPoint]
+bufferToDataPoints buffer = do
   buf <- takeMVar buffer
   putMVar buffer []
   let cmp a b = mconcat
@@ -298,7 +299,7 @@ bufferToDataPoints timestamp buffer = do
                   , compare (dpTimestamp a) (dpTimestamp b)
                   , compare (dpValue a) (dpValue b)
                   ]
-  pure (nub . sortBy cmp . map (toDataPoint timestamp) $ buf)
+  pure (nub . sortBy cmp . map (\(k,t,v) -> toDataPoint t (k,v)) $ buf)
 
 chunkRecords :: Int64 -> [BL.ByteString] -> [BL.ByteString]
 chunkRecords n = unfoldr (\case [] -> Nothing; recs -> Just (splitRecords n recs))
@@ -333,9 +334,9 @@ chunkedPayload chunkSize =
 
 sendMetrics :: Config -> Accumulators -> IO ()
 sendMetrics config (counters, buffer) = do
-  timestamp <- getTimestamp
+  timestamp <- mkTimestamp
   points <- (++) <$> countersToDataPoints timestamp counters <*>
-                     bufferToDataPoints timestamp buffer
+                     bufferToDataPoints buffer
   unless (null points) $ do
     let payloads =
           case metricsMaxBodySize config of
@@ -405,6 +406,24 @@ matchNumberishField key event =
         x -> pure x
     Just val -> matchError "Only string or number fields supported." key val
 
+-- We assume that @timestamp fields always end with 'Z' meaning
+-- UTC time zone.
+parseTimestamp :: Text -> Maybe UTCTime
+parseTimestamp =
+  parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" . toS
+
+getTimestamp :: LogEvent -> LogIO (Maybe Int64)
+getTimestamp event =
+  case HashMap.lookup "@timestamp" event of
+    Nothing -> do
+      say "No @timestamp field. Not matching."
+      pure Nothing
+    Just (Aeson.String txt)
+      | Just t <- parseTimestamp txt -> pure (Just (round (utcTimeToPOSIXSeconds t)))
+      | otherwise -> matchError "Parse failure." "@timestamp" txt
+    Just val ->
+      matchError "Non-string @timestamp field." "@timestamp" val
+
 matchCountingDef :: LogEvent -> Metric -> LogIO (Maybe Action)
 matchCountingDef event metric = do
   let Metric {incrementBy, count, collectFrom, collectConst} = metric
@@ -412,8 +431,16 @@ matchCountingDef event metric = do
     (Nothing, Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
     (Just (field, mul), _, _, _) -> apply (Count . (+)) mul field
     (Nothing, Just (field, mul), _, _) -> apply (Count . const) mul field
-    (Nothing, Nothing, Just field, _) -> apply Collect 1 field
-    (Nothing, Nothing, Nothing, Just x) -> pure (Just (Collect x))
+    (Nothing, Nothing, Just field, _) -> do
+      timestamp <- getTimestamp event
+      case timestamp of
+        Nothing -> pure Nothing
+        Just t -> apply (Collect t) 1 field
+    (Nothing, Nothing, Nothing, Just x) -> do
+      timestamp <- getTimestamp event
+      case timestamp of
+        Nothing -> pure Nothing
+        Just t -> pure (Just (Collect t x))
   where
     apply :: (Int64 -> Action) -> Double -> Text -> LogIO (Maybe Action)
     apply f mul field = do
@@ -463,7 +490,7 @@ handleLogEvent config accs metrics source =
       Right (Aeson.Object event) -> do
         matches <- matchingMetrics event metrics
         liftIO $ do
-          timestamp <- getTimestamp
+          timestamp <- mkTimestamp
           mapM_ (uncurry $ accumulate config timestamp accs) matches
       _ -> say "Received a non-object"
 
