@@ -406,11 +406,13 @@ matchNumberishField key event =
         x -> pure x
     Just val -> matchError "Only string or number fields supported." key val
 
--- We assume that @timestamp fields always end with 'Z' meaning
--- UTC time zone.
 parseTimestamp :: Text -> Maybe UTCTime
-parseTimestamp =
-  parseTimeM True defaultTimeLocale "%Y-%m-%dT%H:%M:%S%QZ" . toS
+parseTimestamp txt =
+  let fmt = "%Y-%m-%dT%H:%M:%S%Q" in
+  let parse suf = parseTimeM True defaultTimeLocale (fmt ++ suf) (toS txt) in
+  case parse "%z" of
+    Nothing -> parse "%Z"
+    Just t -> Just t
 
 getTimestamp :: LogEvent -> LogIO (Maybe Int64)
 getTimestamp event =
