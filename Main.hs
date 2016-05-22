@@ -82,7 +82,6 @@ data Metric = Metric
   , mapTags :: Maybe (HashMap Name Text)
   , inheritTags :: Maybe [Name]
   , incrementBy :: Maybe (Text, Double)
-  , count :: Maybe (Text, Double) -- TODO: rename to 'const'?
   , collectFrom :: Maybe Text
   , collectConst :: Maybe Int64
   } deriving Generic
@@ -108,7 +107,6 @@ instance FromJSON Metric where
       o .:? "mapTags" <*>
       o .:? "inheritTags" <*>
       ((o .:? "incrementBy") >>= scaledField) <*>
-      ((o .:? "count") >>= scaledField) <*>
       o .:? "collectFrom" <*>
       o .:? "collectConst"
 
@@ -428,17 +426,16 @@ getTimestamp event =
 
 matchCountingDef :: LogEvent -> Metric -> LogIO (Maybe Action)
 matchCountingDef event metric = do
-  let Metric {incrementBy, count, collectFrom, collectConst} = metric
-  case (incrementBy, count, collectFrom, collectConst) of
-    (Nothing, Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
-    (Just (field, mul), _, _, _) -> apply (Count . (+)) mul field
-    (Nothing, Just (field, mul), _, _) -> apply (Count . const) mul field
-    (Nothing, Nothing, Just field, _) -> do
+  let Metric {incrementBy, collectFrom, collectConst} = metric
+  case (incrementBy, collectFrom, collectConst) of
+    (Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
+    (Just (field, mul), _, _) -> apply (Count . (+)) mul field
+    (Nothing, Just field, _) -> do
       timestamp <- getTimestamp event
       case timestamp of
         Nothing -> pure Nothing
         Just t -> apply (Collect t) 1 field
-    (Nothing, Nothing, Nothing, Just x) -> do
+    (Nothing, Nothing, Just x) -> do
       timestamp <- getTimestamp event
       case timestamp of
         Nothing -> pure Nothing
