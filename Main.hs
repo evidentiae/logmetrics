@@ -82,7 +82,7 @@ data Metric = Metric
   , mapTags :: Maybe (HashMap Name Text)
   , inheritTags :: Maybe [Name]
   , incrementBy :: Maybe (Text, Double)
-  , collectFrom :: Maybe Text
+  , collectFrom :: Maybe (Text, Double)
   , collectConst :: Maybe Int64
   } deriving Generic
 
@@ -107,7 +107,7 @@ instance FromJSON Metric where
       o .:? "mapTags" <*>
       o .:? "inheritTags" <*>
       ((o .:? "incrementBy") >>= scaledField) <*>
-      o .:? "collectFrom" <*>
+      ((o .:? "collectFrom") >>= scaledField) <*>
       o .:? "collectConst"
 
 data Config = Config
@@ -430,11 +430,11 @@ matchCountingDef event metric = do
   case (incrementBy, collectFrom, collectConst) of
     (Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
     (Just (field, mul), _, _) -> apply (Count . (+)) mul field
-    (Nothing, Just field, _) -> do
+    (Nothing, Just (field, mul), _) -> do
       timestamp <- getTimestamp event
       case timestamp of
         Nothing -> pure Nothing
-        Just t -> apply (Collect t) 1 field
+        Just t -> apply (Collect t) mul field
     (Nothing, Nothing, Just x) -> do
       timestamp <- getTimestamp event
       case timestamp of
