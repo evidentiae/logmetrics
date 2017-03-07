@@ -8,7 +8,7 @@
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
 
-import Data.Aeson (FromJSON, ToJSON, (.=), (.:), (.:?))
+import Data.Aeson (FromJSON, ToJSON, FromJSONKey, ToJSONKey, (.=), (.:), (.:?))
 import Data.Char
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
@@ -158,7 +158,8 @@ mkTimestamp = round <$> getPOSIXTime
 ------------------------------------------------------------------------------
 
 -- | OpenTSDB metric/tag name
-newtype Name = Name Text deriving (Ord, Eq, Generic, Hashable)
+newtype Name = Name Text
+  deriving (Ord, Eq, Generic, Hashable, FromJSONKey, ToJSONKey)
 
 validChar :: Char -> Aeson.Parser ()
 validChar c
@@ -173,22 +174,6 @@ instance FromJSON Name where
 
 instance ToJSON Name where
   toJSON (Name s) = Aeson.toJSON s
-
--- | Transform the keys and values of a 'H.HashMap'.
-mapKeyVal :: (Eq k2, Hashable k2) => (k1 -> k2) -> (v1 -> v2) -> HashMap k1 v1 -> HashMap k2 v2
-mapKeyVal fk kv = HashMap.foldrWithKey (\k v -> HashMap.insert (fk k) (kv v)) HashMap.empty
-{-# INLINE mapKeyVal #-}
-
--- | Transform the keys of a 'H.HashMap'.
-mapKey :: (Eq k2, Hashable k2) => (k1 -> k2) -> HashMap k1 v -> HashMap k2 v
-mapKey fk = mapKeyVal fk id
-{-# INLINE mapKey #-}
-
-instance FromJSON (HashMap Name Text) where
-  parseJSON v = mapKey Name <$> Aeson.parseJSON v
-
-instance ToJSON (HashMap Name Text) where
-  toJSON m = Aeson.object [(k, Aeson.String v) | (Name k, v) <- HashMap.toList m]
 
 type LogEvent = HashMap Text Aeson.Value
 
