@@ -9,6 +9,7 @@
 {-# LANGUAGE LambdaCase #-}
 
 import Data.Aeson (FromJSON, ToJSON, FromJSONKey, ToJSONKey, (.=), (.:), (.:?))
+import Data.Aeson.Types (FromJSONKeyFunction (FromJSONKeyText), toJSONKeyText)
 import Data.Char
 import Data.Hashable
 import Data.HashMap.Strict (HashMap)
@@ -159,7 +160,7 @@ mkTimestamp = round <$> getPOSIXTime
 
 -- | OpenTSDB metric/tag name
 newtype Name = Name Text
-  deriving (Ord, Eq, Generic, Hashable, FromJSONKey, ToJSONKey)
+  deriving (Ord, Eq, Generic, Hashable)
 
 validChar :: Char -> Aeson.Parser ()
 validChar c
@@ -171,6 +172,14 @@ validName txt = mapM_ validChar (Text.unpack txt) >> pure (Name txt)
 
 instance FromJSON Name where
   parseJSON = Aeson.withText "metric name" validName
+
+-- Can't use GeneralizedNewtypeDeriving due to clash with DeriveAnyClass
+instance FromJSONKey Name where
+  fromJSONKey = FromJSONKeyText Name
+
+-- Ditto
+instance ToJSONKey Name where
+  toJSONKey = toJSONKeyText (\(Name x) -> x)
 
 instance ToJSON Name where
   toJSON (Name s) = Aeson.toJSON s
