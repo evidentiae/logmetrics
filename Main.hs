@@ -528,6 +528,7 @@ startServer config accs = do
 main :: IO ()
 main = do
   hSetBuffering stdout LineBuffering
+  hSetBuffering stderr LineBuffering
   putStrLn "Loading config..."
   config <- loadConfig
   putStrLn "Finished loading config"
