@@ -2,11 +2,14 @@
 , unordered-containers, lens, systemd, warp, scotty, text, transformers
 , wreq, stm, string-conv, hashable, list-t, stm-containers, time
 , zlib, pipes-bytestring, pipes-zlib, pipes-http, scientific
+, haskell ? null
 }:
 
 let
 
-  hsLib = import <nixpkgs/pkgs/development/haskell-modules/lib.nix> { pkgs = <nixpkgs/pkgs>; };
+  hsLib =
+    if haskell != null && haskell ? lib then haskell.lib
+    else import <nixpkgs/pkgs/development/haskell-modules/lib.nix> { pkgs = <nixpkgs/pkgs>; };
 
   pipes-zlib' = hsLib.doJailbreak pipes-zlib;
 
