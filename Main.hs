@@ -506,9 +506,11 @@ server :: Config -> Accumulators -> ScottyM ()
 server (config@Config {logHost, logPort, metrics}) accs = do
   Scotty.post "/_bulk" $ do
     body <- Scotty.body
+    contentType <- Scotty.header "Content-Type"
     _ <- liftIO $ forkIO $ processBulk config accs metrics body
     let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
-    r <- liftIO $ Wreq.post logUrl body
+        wreqOpts = Wreq.defaults & Wreq.header "Content-Type" .~ (map toS (maybeToList contentType))
+    r <- liftIO $ Wreq.postWith wreqOpts logUrl body
     Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
     Scotty.raw (r ^. Wreq.responseBody)
   Scotty.matchAny "/" $ Scotty.text "" -- fluentd sends HEAD /
