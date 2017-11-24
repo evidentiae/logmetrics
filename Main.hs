@@ -509,7 +509,8 @@ server (config@Config {logHost, logPort, metrics}) accs = do
     contentType <- Scotty.header "Content-Type"
     _ <- liftIO $ forkIO $ processBulk config accs metrics body
     let logUrl = "http://" ++ logHost ++ ":" ++ show logPort ++ "/_bulk"
-        wreqOpts = Wreq.defaults & Wreq.header "Content-Type" .~ (map toS (maybeToList contentType))
+        contentType' = fromMaybe "application/json" contentType
+        wreqOpts = Wreq.defaults & Wreq.header "Content-Type" .~ [toS contentType']
     r <- liftIO $ Wreq.postWith wreqOpts logUrl body
     Scotty.setHeader "Content-Type" (toS (r ^. Wreq.responseHeader "Content-Type"))
     Scotty.raw (r ^. Wreq.responseBody)
