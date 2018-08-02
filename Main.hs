@@ -1,12 +1,13 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE DeriveAnyClass #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 
 import Data.Aeson (FromJSON, ToJSON, FromJSONKey, ToJSONKey, (.=), (.:), (.:?))
 import Data.Aeson.Types (FromJSONKeyFunction (FromJSONKeyText), toJSONKeyText)
@@ -474,7 +475,10 @@ getDynamicTags event Metric {mapTags, inheritTags} = do
   forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
     mStr <- matchTag field event
     let tagv = fromMaybe "null" mStr
-    pure (tagk, tagv)
+    let denum c = if isNumber c then '_' else c
+    let tagv' | tagk == Name "http_uri_denum" = Text.map denum tagv
+              | otherwise = tagv
+    pure (tagk, tagv')
 
 matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Action)]
 matchingMetrics event metrics = do
