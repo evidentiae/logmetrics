@@ -248,8 +248,8 @@ countersToList counters = atomically (ListT.toList (Map.stream counters))
 
 type Buffer = MVar [(CounterKey, Int64, Int64)]
 
-addToBuffer :: Buffer -> CounterKey -> Int64 -> Int64 -> IO ()
-addToBuffer buffer k t v = modifyMVar_ buffer (\b -> pure ((k,t,v) : b))
+addToBuffer :: Buffer -> CounterKey -> Int64 -> [Int64] -> IO ()
+addToBuffer buffer k t vs = modifyMVar_ buffer $ pure . ([(k,t,v) | v<-vs] ++)
 
 ------------------------------------------------------------------------------
 -- Accumulators
@@ -257,12 +257,14 @@ addToBuffer buffer k t v = modifyMVar_ buffer (\b -> pure ((k,t,v) : b))
 
 type Accumulators = (Counters, Buffer)
 
-data Action = Count (Int64 -> Int64) | Collect Int64 Int64
+data Action
+  = Count (Int64 -> Int64)
+  | Collect Int64 [Int64] -- (timestamp, [value])
 
 accumulate :: Config -> Int64 -> Accumulators -> CounterKey -> Action -> IO ()
 accumulate config timestamp (counters, buffer) k = \case
   Count f -> bumpCounter (metricsMaxAge config) timestamp counters k f
-  Collect t v -> addToBuffer buffer k t v
+  Collect t vs -> addToBuffer buffer k t vs
 
 ------------------------------------------------------------------------------
 -- Metrics thread
@@ -359,17 +361,18 @@ type LogIO a = StateT [Text] IO a
 say :: Text -> LogIO ()
 say !txt = modify' (txt :)
 
-matchError :: Show a => Text -> Text -> a -> LogIO (Maybe b)
-matchError msg key val = do
+matchError :: Show a => Text -> Text -> a -> LogIO ()
+matchError msg key val =
   say (msg <> " Not matching. " <> toS (show key) <> ": " <> toS (show val))
-  pure Nothing
 
 matchTag :: Text -> LogEvent -> LogIO (Maybe Text)
 matchTag key fields =
   case HashMap.lookup key fields of
     Nothing -> pure Nothing
     Just (Aeson.String str) -> pure (Just str)
-    Just val -> matchError "Non-string tags are not supported." key val
+    Just val -> do
+      matchError "Non-string tags are not supported." key val
+      pure Nothing
 
 matchField :: LogEvent -> FieldMatch -> LogIO Bool
 matchField event FieldMatch {match, field, value} =
@@ -384,19 +387,29 @@ matchField event FieldMatch {match, field, value} =
         "!exact" -> value /= str
         "!contains" -> not (value `Text.isInfixOf` str)
         _ -> error "unsupported match type"
-    Just val -> const False <$> matchError "Only string or number fields supported." field val
+    Just val -> do
+      matchError "Only string or number fields supported." field val
+      pure False
 
 -- Matches numbers or strings that can be converted to numbers
-matchNumberishField :: Text -> LogEvent -> LogIO (Maybe Double)
+matchNumberishField :: Text -> LogEvent -> LogIO [Double]
 matchNumberishField key event =
   case HashMap.lookup key event of
-    Nothing -> pure Nothing
-    Just (Aeson.Number x) -> pure (Just (toRealFloat x))
+    Nothing -> pure []
+    Just (Aeson.Number x) -> pure [toRealFloat x]
     Just (Aeson.String str) ->
       case readMaybe (toS str) of
-        Nothing -> matchError "Couldn't parse string field as double." key str
-        x -> pure x
-    Just val -> matchError "Only string or number fields supported." key val
+        Nothing ->
+          let strs = Text.splitOn ", " str
+              nums = mapMaybe (readMaybe . toS) strs
+          in if length nums == length strs then pure nums
+             else do
+               matchError "Couldn't parse string field as double or list of doubles." key str
+               pure []
+        Just x -> pure [x]
+    Just val -> do
+      matchError "Only string or number fields supported." key val
+      pure []
 
 parseTimestamp :: Text -> Maybe UTCTime
 parseTimestamp txt =
@@ -414,33 +427,35 @@ getTimestamp event =
       pure Nothing
     Just (Aeson.String txt)
       | Just t <- parseTimestamp txt -> pure (Just (round (utcTimeToPOSIXSeconds t)))
-      | otherwise -> matchError "Parse failure." "@timestamp" txt
-    Just val ->
+      | otherwise -> do
+          matchError "Parse failure." "@timestamp" txt
+          pure Nothing
+    Just val -> do
       matchError "Non-string @timestamp field." "@timestamp" val
+      pure Nothing
 
 matchCountingDef :: LogEvent -> Metric -> LogIO (Maybe Action)
 matchCountingDef event metric = do
   let Metric {incrementBy, collectFrom, collectConst} = metric
   case (incrementBy, collectFrom, collectConst) of
     (Nothing, Nothing, Nothing) -> pure (Just (Count (+1)))
-    (Just (field, mul), _, _) -> apply (Count . (+)) mul field
+    (Just (field, mul), _, _) -> do
+      ns <- matchNumberishField field event
+      pure $ if null ns then Nothing
+             else Just (Count (round (mul * sum ns) +))
     (Nothing, Just (field, mul), _) -> do
       timestamp <- getTimestamp event
       case timestamp of
         Nothing -> pure Nothing
-        Just t -> apply (Collect t) mul field
+        Just t -> do
+          ns <- matchNumberishField field event
+          pure $ if null ns then Nothing
+                 else Just (Collect t (map (round . (mul*)) ns))
     (Nothing, Nothing, Just x) -> do
       timestamp <- getTimestamp event
       case timestamp of
         Nothing -> pure Nothing
-        Just t -> pure (Just (Collect t x))
-  where
-    apply :: (Int64 -> Action) -> Double -> Text -> LogIO (Maybe Action)
-    apply f mul field = do
-      mN <- matchNumberishField field event
-      case mN of
-        Nothing -> pure Nothing
-        Just n -> pure (Just (f (round (mul*n))))
+        Just t -> pure (Just (Collect t [x]))
 
 matchRec :: LogEvent -> Match -> LogIO Bool
 matchRec event (MatchField m) = matchField event m
