@@ -282,14 +282,12 @@ toDataPoint timestamp (CounterKey {metricName, tags}, counterValue) =
 escapeTagValue :: Text -> Text
 escapeTagValue = Text.map escapeTagChar
 
--- Not sure exactly which characters are valid in tag values,
--- but ? and % are surely invalid (opentsdb API complains about them).
 escapeTagChar :: Char -> Char
 escapeTagChar c | c `elem` illegalChars = '_'
                 | otherwise             =  c
   where
     illegalChars :: String
-    illegalChars = "%?=:&"
+    illegalChars = "%?=:&,"
 
 countersToDataPoints :: Int64 -> Counters -> IO [DataPoint]
 countersToDataPoints timestamp counters = do
