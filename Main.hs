@@ -276,8 +276,18 @@ toDataPoint timestamp (CounterKey {metricName, tags}, counterValue) =
     { dpMetric = metricName
     , dpTimestamp = timestamp
     , dpValue = counterValue
-    , dpTags = HashMap.fromList tags
+    , dpTags = HashMap.fromList [(k, escapeTagValue v) | (k, v) <- tags]
     }
+
+escapeTagValue :: Text -> Text
+escapeTagValue = Text.map escapeTagChar
+
+-- Not sure exactly which characters are valid in tag values,
+-- but ? and % are surely invalid (opentsdb API complains about them).
+escapeTagChar :: Char -> Char
+escapeTagChar '?' = '_'
+escapeTagChar '%' = '_'
+escapeTagChar  c  = c
 
 countersToDataPoints :: Int64 -> Counters -> IO [DataPoint]
 countersToDataPoints timestamp counters = do
