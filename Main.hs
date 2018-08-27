@@ -287,6 +287,7 @@ escapeTagValue = Text.map escapeTagChar
 escapeTagChar :: Char -> Char
 escapeTagChar '?' = '_'
 escapeTagChar '%' = '_'
+escapeTagChar '=' = '_'
 escapeTagChar  c  = c
 
 countersToDataPoints :: Int64 -> Counters -> IO [DataPoint]
