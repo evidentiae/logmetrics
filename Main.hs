@@ -287,7 +287,7 @@ escapeTagChar c | c `elem` illegalChars = '_'
                 | otherwise             =  c
   where
     illegalChars :: String
-    illegalChars = "%?=:&,*()[]{}'@+"
+    illegalChars = "%?=:&,*()[]{}'@+#;"
 
 countersToDataPoints :: Int64 -> Counters -> IO [DataPoint]
 countersToDataPoints timestamp counters = do
