@@ -484,10 +484,7 @@ getDynamicTags event Metric {mapTags, inheritTags} = do
   forM (mapTags' ++ inheritTags') $ \(tagk, field) -> do
     mStr <- matchTag field event
     let tagv = fromMaybe "null" mStr
-    let denum c = if isNumber c then '_' else c
-    let tagv' | tagk == Name "http_uri_denum" = Text.map denum tagv
-              | otherwise = tagv
-    pure (tagk, tagv')
+    pure (tagk, tagv)
 
 matchingMetrics :: LogEvent -> [Metric] -> LogIO [(CounterKey, Action)]
 matchingMetrics event metrics = do
