@@ -16,7 +16,6 @@ import Data.HashMap.Strict (HashMap)
 import Data.Int
 import Data.List
 import Data.Maybe
-import Data.Monoid
 import Data.Scientific
 import Data.String.Conv
 import Data.Text (Text)
@@ -32,7 +31,7 @@ import Control.Monad.Extra
 import Control.Monad.IO.Class
 import Control.Monad.Trans.State.Strict
 import GHC.Generics
-import STMContainers.Map (Map)
+import StmContainers.Map (Map)
 import System.Environment
 import System.Exit
 import System.IO
@@ -53,7 +52,7 @@ import qualified Network.Wreq as Wreq
 import qualified Pipes.ByteString as P
 import qualified Pipes.GZip as P
 import qualified Pipes.HTTP as P
-import qualified STMContainers.Map as Map
+import qualified StmContainers.Map as Map
 import qualified System.Systemd.Daemon as Systemd
 import qualified Web.Scotty as Scotty
 
@@ -240,7 +239,7 @@ bumpCounter metricsMaxAge timestamp counters key f = atomically $ do
       else Map.insert value key counters
 
 countersToList :: Counters -> IO [(CounterKey, CounterValue)]
-countersToList counters = atomically (ListT.toList (Map.stream counters))
+countersToList counters = atomically (ListT.toList (Map.listT counters))
 
 ------------------------------------------------------------------------------
 -- Buffer
