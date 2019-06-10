@@ -406,6 +406,7 @@ matchNumberishField key event =
   case HashMap.lookup key event of
     Nothing -> pure []
     Just (Aeson.Number x) -> pure [toRealFloat x]
+    Just (Aeson.String "") -> pure []
     Just (Aeson.String str) ->
       case readMaybe (toS str) of
         Nothing ->
