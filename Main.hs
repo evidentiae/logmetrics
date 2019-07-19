@@ -520,7 +520,7 @@ processBulk config accs metrics body = do
   mapM_ Text.putStrLn logs
 
 server :: Config -> Accumulators -> ScottyM ()
-server (config@Config {logHost, logPort, metrics}) accs = do
+server config@Config {logHost, logPort, metrics} accs = do
   Scotty.post "/_bulk" $ do
     body <- Scotty.body
     contentType <- Scotty.header "Content-Type"
