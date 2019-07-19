@@ -211,10 +211,7 @@ data CounterKey = CounterKey
   , tags :: [(Name, Text)]
   } deriving (Generic, Hashable, Eq)
 
-data CounterValue = CounterValue
-  { counterValue :: Int64
-  , lastChanged :: Int64
-  }
+data CounterValue = CounterValue {-# UNPACK #-} !Int64 {-# UNPACK #-} !Int64
 
 type Counters = Map CounterKey CounterValue
 
@@ -224,16 +221,11 @@ bumpCounter :: Maybe Int64 -> Int64 -> Counters -> CounterKey -> (Int64 -> Int64
 bumpCounter metricsMaxAge timestamp counters key f = atomically $ do
   mCounter <- Map.lookup key counters
   case mCounter of
-    Nothing -> Map.insert CounterValue {counterValue = f 0, lastChanged = timestamp} key counters
-    Just CounterValue {counterValue,lastChanged} -> do
-      let counterValue' = f counterValue
-          lastChanged' = if counterValue' == counterValue
-                         then lastChanged
-                         else timestamp
-          value = CounterValue
-                    { counterValue = counterValue'
-                    , lastChanged = lastChanged'
-                    }
+    Nothing -> Map.insert (CounterValue (f 0) timestamp) key counters
+    Just CounterValue val lastChanged -> do
+      let val' = f val
+          lastChanged' = if val' == val then lastChanged else timestamp
+          value = CounterValue val' lastChanged'
       if maybe False (timestamp - lastChanged' >) metricsMaxAge
       then Map.delete key counters
       else Map.insert value key counters
