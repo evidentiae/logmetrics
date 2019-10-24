@@ -1,2 +1,5 @@
 { pkgs ? (import <nixpkgs> {}) }:
-(pkgs.haskellPackages.callPackage ./default.nix {}).env
+
+let haskellPackages = pkgs.haskell.packages.ghc864; in
+
+(haskellPackages.callPackage ./default.nix {}).env
